@@ -27,7 +27,10 @@
    means this constant is the ONLY deploy mechanism the app has. Ship a change to
    anything under /css or /js and forget to bump it, and installed phones keep
    serving the previous copy until the browser happens to revalidate. */
-const VERSION = 'jm-v3';
+/* Bumped to evict every cache written by the versions that served code cache
+   first. Without this the old SHELL survives the update and keeps answering with
+   the JavaScript the fix above exists to stop serving. */
+const VERSION = 'jm-v4';
 const SHELL = 'jm-shell-' + VERSION;
 
 const PRECACHE = [
@@ -120,7 +123,25 @@ self.addEventListener('fetch', (event) => {
             // serving something stale, so honour it: reloadable requests arrive
             // with cache 'reload' or 'no-cache' and must not be answered from the
             // cache we are trying to bypass.
-            const fresh = req.cache === 'reload' || req.cache === 'no-cache';
+            // NETWORK FIRST for code, cache first for pictures.
+            //
+            // This served everything from the cache first and revalidated behind it,
+            // which is the usual advice and was wrong here in a way that cost real
+            // time. Pages are never cached, so after a deploy the browser fetched a
+            // fresh mail.html and then served the PREVIOUS mail.js and style.css
+            // beside it. New markup wired by old JavaScript is not a stale page, it
+            // is a broken one: controls that exist in the HTML have nothing
+            // listening to them, and the person looking at it reasonably reports the
+            // feature as missing. That happened more than once, and the deploy was
+            // fine every time.
+            //
+            // Going to the network first for /css/ and /js/ costs one request each
+            // against a server one hop away, and it makes a deploy visible on the
+            // next load rather than the one after. Icons and logos keep the old
+            // behaviour: they are large, they almost never change, and a stale logo
+            // has never broken anything.
+            const isCode = url.pathname.startsWith('/css/') || url.pathname.startsWith('/js/');
+            const fresh = isCode || req.cache === 'reload' || req.cache === 'no-cache';
             if (fresh) {
                 const res = await live;
                 return res || (await cache.match(req)) || Response.error();

@@ -1025,7 +1025,15 @@ public final class MailHtmlSanitizer {
                 + "body{background:" + (dark ? "#202020" : "#ffffff") + ";"
                 + "color:" + (dark ? "#ededed" : "#14212a") + ";"
                 + "font:14.5px/1.68 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;"
-                + "padding:2px 2px 24px;word-wrap:break-word;overflow-wrap:break-word}"
+                // The letter needs its own margin. This was 2px, so the message text
+                // ran into the frame edge while the header directly above it sat 16 to
+                // 22px in, and the two never lined up. The frame is a separate document
+                // and inherits none of the reader pane's padding, so the inset has to be
+                // stated here, and it has to match .rhead in mail.html: 16px on a phone,
+                // 22px above it. The media query works because the frame is a full
+                // document whose own width is the one being asked about.
+                + "padding:10px 16px 36px;word-wrap:break-word;overflow-wrap:break-word}"
+                + "@media (min-width:700px){body{padding:12px 22px 40px}}"
                 + "a{color:var(--jcl)}"
                 + "img{max-width:100%;height:auto}"
                 + "table{max-width:100%}"

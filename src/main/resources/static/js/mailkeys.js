@@ -291,7 +291,12 @@
     if (typing(e)) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
 
-    if (k === '?') {
+    /* Shift and slash, not only the character. Most engines report "?" for that
+       combination on a US layout, but the character a layout puts on that key
+       is not universal and at least one automation driver reports the unshifted
+       key with the modifier flag set instead. Reading both spellings costs one
+       clause and is the difference between the help being reachable and not. */
+    if (k === '?' || (k === '/' && e.shiftKey)) {
       e.preventDefault();
       if (sheetOpen()) closeSheet();
       else if (!modalOpen()) openSheet();

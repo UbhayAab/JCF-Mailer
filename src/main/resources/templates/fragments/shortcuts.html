@@ -1,3 +1,5 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
 <!--
   Jarurat Mail - the productivity layer.
 
@@ -30,6 +32,7 @@
   paints charcoal rather than user agent white.
 -->
 
+<head>
 <th:block th:fragment="styles">
 <style>
     /* ==============================================================
@@ -100,7 +103,13 @@
     .jmb-wrap{position:sticky;top:0;z-index:30;grid-column:1 / -1;
               background:var(--panel-2,#1c1c1c);border-bottom:1px solid var(--border,rgba(255,255,255,.09));
               box-shadow:0 1px 0 rgba(0,0,0,.25)}
-    .jmb-bar{display:flex;align-items:center;gap:2px;min-height:48px;padding:0 8px 0 0}
+    /* No gap and no padding at the phone width, and that is arithmetic rather
+       than taste: 44 for the master box plus six 44px controls is 308 of a
+       390px screen, and the eight 2px gaps and 8px of padding that looked fine
+       on a desktop took the count down to 60px, where "6 selected" rendered as
+       "6 sele...". The controls are already 44 wide, so the space between them
+       is their own padding and the bar does not need to add any. */
+    .jmb-bar{display:flex;align-items:center;gap:0;min-height:48px;padding:0}
     .jmb-all{display:flex;align-items:center;justify-content:center;width:44px;min-height:44px;
              cursor:pointer;flex:none;-webkit-tap-highlight-color:transparent}
     .jmb-all input{width:20px;height:20px;margin:0;cursor:pointer}
@@ -163,7 +172,7 @@
         .jmb-check input{width:16px;height:16px}
         .jmb-all{width:34px}
         .jmb-all input{width:16px;height:16px}
-        .jmb-bar{min-height:44px}
+        .jmb-bar{min-height:44px;gap:2px;padding:0 8px 0 0}
         .jmb-btn{width:34px;height:34px}
     }
 
@@ -222,7 +231,8 @@
     }
 </style>
 </th:block>
-
+</head>
+<body>
 
 <th:block th:fragment="markup">
 
@@ -370,3 +380,5 @@
 <script src="/js/mailbulk.js?v=prod1"></script>
 <script src="/js/mailkeys.js?v=prod1"></script>
 </th:block>
+</body>
+</html>
