@@ -1169,6 +1169,9 @@
             .sk{background:var(--panel-3)}
         }
     </style>
+    <!-- Styles for the shortcut sheet, which ships as its own fragment rather than
+         living in this file's inline stylesheet. -->
+    <th:block th:replace="~{fragments/shortcuts :: styles}"></th:block>
 </head>
 <body>
 <th:block th:replace="~{fragments/icons :: sprite}"></th:block>
@@ -1585,7 +1588,27 @@
      deploy would otherwise hand an installed phone this template with the
      previous script: no tab wiring, no data-pane, no slide. The other half is
      bumping VERSION in sw.js, which is a different file and a different owner. -->
+<!--
+  The surfaces and scripts that were built as separate, self-contained files so that
+  several people could work on this page at once. Each one degrades to doing nothing
+  when the elements it expects are absent, which is what makes including them here
+  safe, but it also meant that while they were NOT included nothing failed loudly:
+  the keyboard shortcuts, the bulk selection bar, the schedule and undo outbox, the
+  signature and the auto-responder were all complete and all unreachable, and from
+  the outside that is indistinguishable from never having been built. It was reported
+  as missing features twice. Anything added here in future needs its include line in
+  the same change, not afterwards.
+-->
+<th:block th:replace="~{fragments/shortcuts :: markup}"></th:block>
+<th:block th:replace="~{fragments/session :: surface}"></th:block>
+
 <script src="/js/mail.js?v=compose1"></script>
+<!-- After mail.js, because each of these reads the state it publishes. The bulk,
+     shortcut and session scripts are NOT listed here: their own fragments carry
+     the script tags, and naming them again loaded each one twice. -->
+<script src="/js/mailsettings.js?v=settings1"></script>
+<script src="/js/notify.js?v=notify1"></script>
+<th:block th:replace="~{fragments/shortcuts :: script}"></th:block>
 <th:block th:replace="~{fragments/pwa :: script}"></th:block>
 </body>
 </html>

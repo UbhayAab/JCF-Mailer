@@ -2281,7 +2281,10 @@ function openCompose(seed) {
     cCc.set(seed.cc || []);
     cBcc.set(seed.bcc || []);
     $('cSubject').value = seed.subject || '';
-    setEditorHtml(seed.html || '');
+    // A reply and a forward bring their own body and have already placed the
+    // signature above the quote. Only a blank composer needs one added here, and
+    // seed.html being empty is exactly what "blank" means.
+    setEditorHtml(seed.html || signatureBlock('new'));
     COMPOSE.replyTo = seed.replyTo || null;
     COMPOSE.forwardOf = seed.forwardOf || null;
     COMPOSE.keep = seed.keep || [];
@@ -2683,6 +2686,25 @@ function attributionOf(m) {
 }
 
 /** The quoted original, as the markup the composer will hold. */
+/**
+ * The mailbox's signature, as a block to sit above a quote or below a blank line.
+ *
+ * Reads through the MailSettings module, which is a separate script, so every call
+ * has to survive that script being absent: it was built and left out of this page
+ * for a while, and a hard reference here would have taken the composer down with it
+ * rather than simply producing no signature. The separator is the standard "-- ",
+ * which other clients recognise and collapse.
+ *
+ * @param kind 'new' or 'reply'.
+ */
+function signatureBlock(kind) {
+  var api = window.MailSettings;
+  if (!api || typeof api.signatureFor !== 'function') return '';
+  var sig = api.signatureFor(kind);
+  if (!sig) return '';
+  return '<p><br></p><div class="jsig" data-sig="1">-- <br>' + sig + '</div>';
+}
+
 function quoteBlockOf(m) {
   const inner = cleanForeignHtml(bodyFragmentOf(m.bodyHtml));
   return '<p><br></p><p>' + esc(attributionOf(m)) + '</p>'
@@ -2707,9 +2729,11 @@ function replyTo(m, all) {
     to: [{ name: m.from.name || '', email: m.from.email }],
     cc: cc,
     subject: subject,
-    // The signature would go here, above the quote, the day identities are
-    // exposed to this screen. Nothing is invented in its place.
-    html: quoteBlockOf(m),
+    // Above the quote, which is where every client puts it and where the reader
+    // expects to find who wrote to them. MailSettings degrades to an empty string
+    // when it is not on the page or has not answered yet, so a signature never
+    // delays the composer opening.
+    html: signatureBlock('reply') + quoteBlockOf(m),
     replyTo: m.id
   });
   // The caret belongs at the top, above the quote, which is where every client
@@ -3047,6 +3071,15 @@ if (!can('MAIL_SEND')) {
   // difference between a list at 300ms and a list at 700ms on a phone.
   const statusAsk = api('/api/mail/status').then(v => ({ v: v }), e => ({ e: e }));
   const foldersAsk = api('/api/mail/folders').then(v => ({ v: v }), e => ({ e: e }));
+
+  /* Settings are fetched alongside those two rather than when the composer first
+     opens, because the signature has to be in the body the moment Compose is
+     pressed and a round trip started at that point is a visible flicker. Deliberately
+     not awaited: mail is the job, and a settings call that is slow or fails must not
+     hold the list back or stop the mailbox loading. */
+  if (window.MailSettings && typeof window.MailSettings.load === 'function') {
+    window.MailSettings.load().catch(() => { /* no signature is a fine outcome */ });
+  }
 
   const status = await statusAsk;
   S.booting = false;
