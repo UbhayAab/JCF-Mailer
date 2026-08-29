@@ -26,6 +26,10 @@ public final class DeviceHints {
 
     static final String PARAMETER = "desktop";
 
+    static final String SESSION_MAILBOX = "jarurat.ui.mailbox";
+
+    static final String MAILBOX_PARAMETER = "mailbox";
+
     /**
      * Deliberately narrow. Everything not listed is treated as a laptop, including
      * every tablet: an iPad has reported a desktop Safari user agent since iPadOS
@@ -97,5 +101,33 @@ public final class DeviceHints {
     /** A phone that has not asked for the console. */
     public static boolean wantsMailbox(HttpServletRequest request) {
         return isPhone(request) && !prefersDesktop(request);
+    }
+
+    /**
+     * The mirror of {@link #prefersDesktop}: "?mailbox=1" asks for the inbox on a
+     * console account, and is remembered for the session the same way.
+     *
+     * This exists because the landing rule now follows the account rather than the
+     * device, so somebody who runs Campaign Studio and mostly wants their mail on a
+     * phone needs a way to say so once instead of on every link. "?mailbox=0" gives the
+     * console back, for the same reason the desktop switch goes both ways.
+     */
+    public static boolean explicitlyWantsMailbox(HttpServletRequest request) {
+        if (request == null) return false;
+
+        String choice = request.getParameter(MAILBOX_PARAMETER);
+        if (choice != null) {
+            boolean wanted = "1".equals(choice) || "true".equalsIgnoreCase(choice)
+                    || "yes".equalsIgnoreCase(choice);
+            HttpSession session = request.getSession(wanted);
+            if (session != null) {
+                if (wanted) session.setAttribute(SESSION_MAILBOX, Boolean.TRUE);
+                else session.removeAttribute(SESSION_MAILBOX);
+            }
+            return wanted;
+        }
+
+        HttpSession session = request.getSession(false);
+        return session != null && Boolean.TRUE.equals(session.getAttribute(SESSION_MAILBOX));
     }
 }

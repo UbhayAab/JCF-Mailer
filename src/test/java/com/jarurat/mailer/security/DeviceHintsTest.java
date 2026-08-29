@@ -121,16 +121,25 @@ class DeviceHintsTest {
     }
 
     @Test
-    @DisplayName("a console session lands on the mailbox from a phone and the console from a laptop")
-    void consoleSessionFollowsTheDevice() {
+    @DisplayName("a console session follows the account, not the device")
+    void consoleSessionFollowsTheAccount() {
         List<GrantedAuthority> admin = authorities("MAIL_READ", "MAIL_SEND", "CAMPAIGNS_SEND");
-        assertThat(LoginLandingHandler.landingFor(admin, request(IPHONE, "?1"))).isEqualTo("/mail");
+        assertThat(LoginLandingHandler.landingFor(admin, request(IPHONE, "?1"))).isEqualTo("/app");
         assertThat(LoginLandingHandler.landingFor(admin, request(WINDOWS, "?0"))).isEqualTo("/app");
 
+        // "?desktop=1" agrees with the default now rather than overriding it, and is kept
+        // because reading it is what records the choice for the rest of the session.
         MockHttpServletRequest onAPhoneWantingTheConsole = request(IPHONE, "?1");
         onAPhoneWantingTheConsole.setSession(new MockHttpSession());
         onAPhoneWantingTheConsole.setParameter("desktop", "1");
         assertThat(LoginLandingHandler.landingFor(admin, onAPhoneWantingTheConsole)).isEqualTo("/app");
+
+        // The mirror switch, for somebody who runs the console but mostly wants mail on
+        // a phone. Without it that person would have no way to ask at all.
+        MockHttpServletRequest wantingTheMailbox = request(IPHONE, "?1");
+        wantingTheMailbox.setSession(new MockHttpSession());
+        wantingTheMailbox.setParameter("mailbox", "1");
+        assertThat(LoginLandingHandler.landingFor(admin, wantingTheMailbox)).isEqualTo("/mail");
     }
 
     @Test

@@ -18,6 +18,8 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.web.context.DelegatingSecurityContextRepository;
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
@@ -47,14 +49,14 @@ import java.util.Optional;
  * not the reason; a success handler that had to wait for that thread would have to
  * block the redirect on a network call to Stalwart.
  *
- * WHICH DEVICES ARE ENROLLED, and this is a deliberate restriction rather than an
- * oversight. Only a session that is mail-only, or a phone that has not asked for the
- * console, gets a token. A restored session holds Role.MAILBOX and nothing else, so
- * enrolling a laptop that somebody runs Campaign Studio on would mean that the next
- * morning they are silently signed in as a mail-only user, bounced from /app to /mail
- * by PageController, and left with no way back to the console except signing out
- * first. On a phone the mailbox IS the product and that is the right landing anyway.
- * The laptop keeps the eight hour session it always had.
+ * WHICH DEVICES ARE ENROLLED. Any device whose owner asked to stay signed in, on any
+ * account. This was once restricted to mail-only sessions and phones, because a
+ * restored session always came back as Role.MAILBOX and enrolling a console laptop
+ * would have silently downgraded it overnight. The restriction was sound and its cost
+ * was the whole complaint: anybody who also runs Campaign Studio was signed out every
+ * eight hours. A restored session now comes back as the identity that was enrolled,
+ * loaded fresh from the user table on each restore, so the downgrade cannot happen and
+ * the restriction is no longer needed.
  *
  * EVERY FAILURE ENDS AT THE LOGIN PAGE. A missing row, a wrong secret, an expired
  * token, a replayed one, a credential the cookie will not open, a mail server that
@@ -132,6 +134,7 @@ public class PersistentDeviceFilter extends OncePerRequestFilter {
     private final DeviceTokenService tokens;
     private final MailboxAccess mailboxes;
     private final MailCredentialStore credentials;
+    private final UserDetailsService consoleUsers;
 
     /**
      * The same pair Spring Security installs by default on a chain that does not
@@ -143,11 +146,36 @@ public class PersistentDeviceFilter extends OncePerRequestFilter {
             new HttpSessionSecurityContextRepository());
 
     public PersistentDeviceFilter(DeviceSettings settings, DeviceTokenService tokens,
-                                  MailboxAccess mailboxes, MailCredentialStore credentials) {
+                                  MailboxAccess mailboxes, MailCredentialStore credentials,
+                                  UserDetailsService consoleUsers) {
         this.settings = settings;
         this.tokens = tokens;
         this.mailboxes = mailboxes;
         this.credentials = credentials;
+        this.consoleUsers = consoleUsers;
+    }
+
+    /**
+     * The console identity for this address, when there is one.
+     *
+     * Loaded fresh on every restore rather than sealed into the token, so a role
+     * changed, an account deactivated or a person removed since the device was enrolled
+     * takes effect on the next request instead of months later. A token is a claim about
+     * who somebody is; it is never a cached copy of what they are allowed to do.
+     *
+     * An empty answer is the normal case for the many people here who have a mailbox and
+     * no console account at all, and the caller falls back to the mailbox identity.
+     */
+    private Optional<UserDetails> restoreConsoleIdentity(String mailbox) {
+        if (consoleUsers == null) return Optional.empty();
+        try {
+            UserDetails found = consoleUsers.loadUserByUsername(mailbox);
+            if (found == null || !found.isEnabled() || !found.isAccountNonExpired()) return Optional.empty();
+            return Optional.of(found);
+        } catch (RuntimeException e) {
+            // UsernameNotFoundException is the ordinary answer for a mail-only person.
+            return Optional.empty();
+        }
     }
 
     @Override
@@ -236,8 +264,26 @@ public class PersistentDeviceFilter extends OncePerRequestFilter {
             return;
         }
 
+        // Restore the identity that was enrolled, rather than always the mailbox one.
+        //
+        // This used to mint Role.MAILBOX unconditionally, on the reasoning that a
+        // credential lasting months should never be worth more than the mailbox it was
+        // created to carry. That reasoning is sound and it had a cost nobody had
+        // measured: only mail-only accounts were enrolled at all, so anybody who also
+        // runs Campaign Studio was signed out every eight hours and had to type a
+        // password again, which is the complaint this whole feature exists to answer.
+        //
+        // So a console account is enrolled too and comes back as itself. What keeps that
+        // defensible is the rest of the design rather than a reduced role: only a hash
+        // of the token is stored, it rotates on every use, replaying a rotated one
+        // revokes the whole family, signing out revokes the row, and the mailbox
+        // password is re-offered to the mail server on every restore, so a password
+        // change anywhere invalidates the device within one request.
+        UserDetails principal = restoreConsoleIdentity(mailbox)
+                .map(UserDetails.class::cast)
+                .orElseGet(() -> new MailboxUserDetails(mailbox));
+
         SecurityContext context = SecurityContextHolder.createEmptyContext();
-        MailboxUserDetails principal = new MailboxUserDetails(mailbox);
         context.setAuthentication(UsernamePasswordAuthenticationToken.authenticated(
                 principal, null, principal.getAuthorities()));
         SecurityContextHolder.setContext(context);
@@ -267,10 +313,6 @@ public class PersistentDeviceFilter extends OncePerRequestFilter {
         noteConsent(request, session);
         if (Boolean.TRUE.equals(session.getAttribute(SESSION_CHECKED))) return;
 
-        if (!LoginLandingHandler.isMailOnly(auth.getAuthorities()) && !DeviceHints.wantsMailbox(request)) {
-            session.setAttribute(SESSION_CHECKED, Boolean.TRUE);
-            return;
-        }
 
         // The sign-in form carries a "Keep me signed in on this device" box and this is
         // what honours it. Enrolling without asking would have made that control

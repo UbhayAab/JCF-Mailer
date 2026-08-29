@@ -39,7 +39,7 @@
    been updated in the background" notice instead, and the whole feature would
    look to the owner as though it had never been built. The cache name changing
    also re-fetches /js/notify.js, which is the other half of this change. */
-const VERSION = 'jm-v5';
+const VERSION = 'jm-v6';
 const SHELL = 'jm-shell-' + VERSION;
 
 const PRECACHE = [

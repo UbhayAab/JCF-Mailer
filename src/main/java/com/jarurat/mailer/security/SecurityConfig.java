@@ -307,12 +307,14 @@ public class SecurityConfig {
                                             MailboxAccess mailboxes,
                                             DeviceSettings deviceSettings,
                                             DeviceTokenService deviceTokens,
-                                            MailCredentialStore mailCredentials) throws Exception {
+                                            MailCredentialStore mailCredentials,
+                                            AppUserDetailsService consoleUsers) throws Exception {
         // Constructed here rather than annotated, because Spring Boot also registers
         // every Filter bean with the servlet container: an @Component on it would put
         // it in front of the stateless API chain as well and run it twice on this one.
         PersistentDeviceFilter persistentDevice =
-                new PersistentDeviceFilter(deviceSettings, deviceTokens, mailboxes, mailCredentials);
+                new PersistentDeviceFilter(deviceSettings, deviceTokens, mailboxes, mailCredentials,
+                        consoleUsers);
         // The default XOR handler expects a BREACH-encoded value, which a fetch()
         // reading the raw cookie cannot produce. The plain handler matches what
         // the browser actually sends back.

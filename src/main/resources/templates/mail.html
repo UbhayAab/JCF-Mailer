@@ -1481,6 +1481,14 @@
                 <svg class="ic ic-sm chev" aria-hidden="true"><use href="#i-next"/></svg></a>
             <button class="mrow" type="button" data-jm-install>
                 <svg class="ic" aria-hidden="true"><use href="#i-install"/></svg><span>Install app</span></button>
+            <!-- An installed worker keeps running its old script until every tab for the
+                 site is closed, which on a home screen can be weeks, so a fix could be
+                 live on the server and invisible here. update.js offers this the moment
+                 it notices a new version; this row is the way to ask for it, so that
+                 nobody is ever told to delete the app and add it again to pick up a
+                 change. -->
+            <button class="mrow" type="button" data-jm-update>
+                <svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg><span>Check for updates</span></button>
             <!-- "Stay signed in on this device" is only defensible if this row
                  exists, so it is not optional and it is not buried in settings. -->
             <button class="mrow" type="button" id="shDevices">
@@ -1760,6 +1768,7 @@
 <script src="/js/mailsettings.js?v=settings1"></script>
 <script src="/js/notify.js?v=notify1"></script>
 <th:block th:replace="~{fragments/shortcuts :: script}"></th:block>
+<script src="/js/update.js?v=u1"></script>
 <th:block th:replace="~{fragments/pwa :: script}"></th:block>
 </body>
 </html>

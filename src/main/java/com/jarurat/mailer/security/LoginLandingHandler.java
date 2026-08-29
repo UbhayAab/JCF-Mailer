@@ -85,7 +85,26 @@ public class LoginLandingHandler extends SimpleUrlAuthenticationSuccessHandler {
         if (authorities == null || authorities.isEmpty()) return CONSOLE;
         if (!has(authorities, Permission.MAIL_READ)) return CONSOLE;
         if (isMailOnly(authorities)) return MAILBOX;
-        return DeviceHints.wantsMailbox(request) ? MAILBOX : CONSOLE;
+
+        // The ACCOUNT decides this, not the device.
+        //
+        // It used to be the device: a phone went to the mailbox whoever signed in, on
+        // the reasoning that a phone is a mailbox product. That is right for the person
+        // who only has a mailbox, and it is already handled above, because their account
+        // holds nothing else. It was wrong for everybody else. Signing in on a phone with
+        // the account that runs Campaign Studio landed on the inbox with the console
+        // reachable only by knowing to add a query parameter, which reads as the sign in
+        // having gone somewhere unintended rather than as a considered default.
+        //
+        // So a console account lands on the console and a mailbox account lands on the
+        // mailbox, on every device. The mailbox is still one tap from the console's own
+        // navigation, which is the right way to reach it.
+        // Consulted before the mailbox flag, and not only for its answer: reading it is
+        // what records the choice on the session, so "?desktop=1" still survives the
+        // redirect it causes and every link after it. It now agrees with the default for
+        // a console account rather than overriding it, which is why it is kept at all.
+        if (DeviceHints.prefersDesktop(request)) return CONSOLE;
+        return DeviceHints.explicitlyWantsMailbox(request) ? MAILBOX : CONSOLE;
     }
 
     /**

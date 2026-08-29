@@ -71,14 +71,19 @@ class LoginLandingHandlerTest {
     }
 
     @Test
-    @DisplayName("a console session on a phone lands on the mailbox")
-    void consoleSessionOnAPhoneLandsOnTheMailbox() throws Exception {
+    @DisplayName("a console session lands on the console, on a phone as much as a laptop")
+    void consoleSessionLandsOnTheConsoleEvenOnAPhone() throws Exception {
+        // The account decides this, not the device. Signing in on a phone with the
+        // account that runs Campaign Studio used to land on the inbox, with the console
+        // reachable only by knowing to add a query parameter, which reads as the sign in
+        // having gone somewhere unintended. Somebody who only has a mailbox is unaffected:
+        // their account holds nothing else and they are answered before this rule.
         MockHttpServletRequest request = loginPost(IPHONE);
         MockHttpServletResponse response = new MockHttpServletResponse();
 
         handler.onAuthenticationSuccess(request, response, consoleSession());
 
-        assertThat(response.getRedirectedUrl()).isEqualTo("/mail");
+        assertThat(response.getRedirectedUrl()).isEqualTo("/app");
     }
 
     @Test

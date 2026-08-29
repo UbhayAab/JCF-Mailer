@@ -19,6 +19,8 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 
@@ -52,6 +54,7 @@ class PersistentDeviceFilterTest {
     private DeviceTokenService tokens;
     private MailboxAccess mailboxes;
     private MailCredentialStore credentials;
+    private UserDetailsService consoleUsers;
     private PersistentDeviceFilter filter;
 
     @BeforeEach
@@ -59,8 +62,15 @@ class PersistentDeviceFilterTest {
         tokens = mock(DeviceTokenService.class);
         mailboxes = mock(MailboxAccess.class);
         credentials = mock(MailCredentialStore.class);
+        consoleUsers = mock(UserDetailsService.class);
+        // The ordinary case here is a person with a mailbox and no console account,
+        // which is what most of this organisation is, so the lookup finds nothing and
+        // the filter falls back to the mailbox identity.
+        when(consoleUsers.loadUserByUsername(anyString()))
+                .thenThrow(new UsernameNotFoundException("no console account"));
         filter = new PersistentDeviceFilter(
-                new DeviceSettings(true, true, 180, 60, 12), tokens, mailboxes, credentials);
+                new DeviceSettings(true, true, 180, 60, 12), tokens, mailboxes, credentials,
+                consoleUsers);
         SecurityContextHolder.clearContext();
     }
 
@@ -219,8 +229,8 @@ class PersistentDeviceFilterTest {
     }
 
     @Test
-    @DisplayName("a laptop running the console is left on the eight hour session")
-    void aConsoleSessionIsNotEnrolled() throws Exception {
+    @DisplayName("a console laptop is enrolled too, once its owner has asked")
+    void aConsoleSessionIsEnrolledWithConsent() throws Exception {
         signIn(new SimpleGrantedAuthority(Permission.CAMPAIGNS_SEND.name()),
                 new SimpleGrantedAuthority(Permission.MAIL_READ.name()));
         when(mailboxes.current(any(), any())).thenReturn(MAILBOX);
@@ -229,12 +239,16 @@ class PersistentDeviceFilterTest {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/app");
         request.addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126");
         request.setSession(new MockHttpSession());
+        request.setParameter("remember", "true");
         filter.doFilter(request, new MockHttpServletResponse(), new MockFilterChain());
 
-        // A restored session holds Role.MAILBOX only. Enrolling this one would sign
-        // somebody back in tomorrow with less than they had, and PageController would
-        // bounce them from /app to /mail with no way back except signing out.
-        verify(tokens, never()).enrol(any(), anyString(), anyString(), anyString(), anyString(), any());
+        // This used to be excluded, because a restored session always came back as
+        // Role.MAILBOX and enrolling a console laptop would have silently downgraded it
+        // overnight. The exclusion was sound and its cost was the whole complaint:
+        // anybody who also runs Campaign Studio was signed out every eight hours. A
+        // restored session now comes back as the identity that was enrolled, loaded
+        // fresh from the user table, so the downgrade cannot happen.
+        verify(tokens).enrol(any(), eq(MAILBOX), eq(PASSWORD), anyString(), anyString(), any());
     }
 
     @Test
@@ -254,7 +268,8 @@ class PersistentDeviceFilterTest {
     @DisplayName("with the feature switched off the filter does nothing at all")
     void theKillSwitch() throws Exception {
         PersistentDeviceFilter off = new PersistentDeviceFilter(
-                new DeviceSettings(false, true, 180, 60, 12), tokens, mailboxes, credentials);
+                new DeviceSettings(false, true, 180, 60, 12), tokens, mailboxes, credentials,
+                consoleUsers);
 
         off.doFilter(requestWithCookie("/mail"), new MockHttpServletResponse(), new MockFilterChain());
 
