@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<!--
+  The session lifetime surface: a countdown, a warning dialog a few minutes before
+  the eight hour timeout, and an honest answer once it has passed.
+
+  One line wires it into a page, at the end of the body, next to the other script
+  fragment:
+
+      <th:block th:replace="~{fragments/session :: surface}"></th:block>
+
+  Everything else is in /js/session.js, including the markup and the styling. That is
+  the same choice pwa.html made and for the same reason: this surface has to look
+  identical on the console, the mailbox and anything added later, and only some of
+  those pages load style.css. Rendering the dialog here would put its markup in one
+  file and its design tokens in another, and the pages that own neither would get
+  half of it.
+
+  There is deliberately nothing in this fragment that reads the session. A page that
+  is included in error, or served to somebody signed out, loads the script, gets a
+  401 from GET /api/session on the first call and goes quiet. No Thymeleaf expression
+  means no expression that can fail to resolve, and an expression that fails to
+  resolve takes the whole page down - a far worse outcome than the missing warning
+  this fragment was written to fix.
+
+  Put it on the signed-in pages only. On /login and the landing page it costs one
+  request to be told there is no session, which is a waste rather than a fault.
+-->
+<body>
+<th:block th:fragment="surface">
+    <script src="/js/session.js"></script>
+</th:block>
+</body>
+</html>

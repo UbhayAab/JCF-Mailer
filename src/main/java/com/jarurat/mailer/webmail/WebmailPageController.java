@@ -1,6 +1,6 @@
 package com.jarurat.mailer.webmail;
 
-import com.jarurat.mailer.security.AppUserDetails;
+import com.jarurat.mailer.security.SignedInUser;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.stereotype.Controller;
@@ -14,13 +14,18 @@ import org.springframework.web.bind.annotation.GetMapping;
  *
  * Gated on the same permission as the data behind it, so a role without mail access
  * gets one honest 403 instead of a fully drawn screen whose every panel then fails.
+ *
+ * The principal is a SignedInUser rather than an AppUserDetails because this is the
+ * one page a mail-only session can reach, and that session has no app_user row behind
+ * it. Both principals answer the four questions this page asks, and Role.MAILBOX
+ * carries MAIL_READ, so the gate above passes for either.
  */
 @Controller
 public class WebmailPageController {
 
     @GetMapping("/mail")
     @PreAuthorize("hasAuthority('MAIL_READ')")
-    public String mail(@AuthenticationPrincipal AppUserDetails user, Model model) {
+    public String mail(@AuthenticationPrincipal SignedInUser user, Model model) {
         model.addAttribute("userEmail", user.getUsername());
         model.addAttribute("userName", user.getFullName());
         model.addAttribute("userRole", user.getRole().getLabel());

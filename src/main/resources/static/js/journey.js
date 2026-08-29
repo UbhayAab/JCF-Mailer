@@ -147,8 +147,16 @@ function renderCanvas() {
       + '<div class="jrn-name">' + esc(n.name) + '</div>'
       + '<div class="jrn-meta">' + nodeSummary(n) + '</div>'
       + (n.here ? '<span class="jrn-here">' + num(n.here) + ' here now</span>' : '')
+      // A sprite icon rather than the rightwards-arrow character this used to
+      // carry. A character is drawn by whichever font the device resolves it in,
+      // so it arrived at a different weight and baseline on every machine and
+      // vanished entirely where no font covered it. The entity is not written out
+      // even here, so that a sweep for leftover glyphs comes back genuinely empty
+      // rather than landing on this explanation. See templates/fragments/icons.html.
       + '<button class="jrn-port" title="Connect this step to another"'
-        + ' aria-label="Connect ' + attr(n.name) + ' to another step">&#8594;</button>';
+        + ' aria-label="Connect ' + attr(n.name) + ' to another step">'
+        + '<svg class="ic ic-sm" aria-hidden="true"><use href="#i-arrow-right"/></svg>'
+        + '</button>';
 
     surface.appendChild(el);
   });

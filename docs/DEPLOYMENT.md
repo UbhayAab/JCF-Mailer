@@ -71,6 +71,26 @@ Notes that matter:
 - **nginx terminates TLS**, so the app runs with
   `server.forward-headers-strategy=framework` and builds absolute tracking and
   unsubscribe URLs from the forwarded headers rather than from its own socket.
+- **`proxy_set_header X-Real-IP $remote_addr;` in `/etc/nginx/sites-enabled/jcfmailer`
+  is a security control, not a convenience.** It is the only trustworthy source of the
+  caller's address that reaches the application, and the login rate limiter, the OTP
+  burst limit and the source address on every audit row all key on it.
+
+  The reason is not obvious and was measured rather than guessed. `X-Forwarded-For` is
+  built with `$proxy_add_x_forwarded_for`, which appends the real peer to whatever the
+  caller already sent, so its first element is attacker supplied. Worse,
+  `forward-headers-strategy=framework` makes Spring register `ForwardedHeaderFilter`
+  ahead of the security chain, and that filter strips every `X-Forwarded-*` header
+  before the application sees it while rewriting `getRemoteAddr()` from that first,
+  caller-supplied element. So with this line removed nothing breaks visibly: the site
+  serves, the tests pass, and the rate limiter quietly begins trusting a value the
+  caller chooses. Measured against the running app, that let one machine take 400 of
+  400 guesses at a single mailbox and let anyone answer 429 to a chosen office.
+
+  `X-Real-IP` is correct here because nginx overwrites it unconditionally rather than
+  appending, and because it is not one of the seven names that filter strips. If a
+  second proxy is ever put in front, revisit this: the assumption is exactly one.
+  See `security/ClientIp.java`.
 - **Stalwart's 8443 is not exposed to the internet.** Reach the web admin over an SSH
   tunnel: `ssh -i <key> -L 8443:127.0.0.1:8443 <user>@<host>`, then open
   `https://127.0.0.1:8443` and accept the certificate warning. The certificate is

@@ -39,12 +39,32 @@ public class MailboxAccess {
     private final JmapClient client;
     private final String domain;
 
+    /**
+     * A blank domain is refused at startup rather than accepted quietly.
+     *
+     * The property is ${MAIL_DOMAIN:jarurat.care}, so an operator can point this at
+     * another domain, and an operator can also set MAIL_DOMAIN= by accident. That
+     * used to leave the guard in normalise() switched off, which turns /login and
+     * /api/mail/unlock into general-purpose credential probes against whatever
+     * MAIL_JMAP_URL points at and fills this process's credential map with keys for
+     * addresses we host nothing for. It is not an authentication bypass, because
+     * Stalwart still refuses the logins, but a security guard that reads as
+     * unconditional and silently is not is worse than one that is missing. Failing to
+     * boot is loud, happens on deploy rather than in production traffic, and is fixed
+     * by one line of configuration.
+     */
     public MailboxAccess(MailCredentialStore credentials,
                          JmapClient client,
                          @Value("${jarurat.mail.domain:jarurat.care}") String domain) {
         this.credentials = credentials;
         this.client = client;
         this.domain = domain == null ? "" : domain.trim().toLowerCase(Locale.ROOT);
+        if (this.domain.isEmpty()) {
+            throw new IllegalStateException(
+                    "jarurat.mail.domain is blank. Set MAIL_DOMAIN to the mail domain, "
+                            + "for example jarurat.care. It is the only thing keeping the "
+                            + "mailbox endpoints from probing arbitrary addresses.");
+        }
     }
 
     /**
@@ -102,8 +122,72 @@ public class MailboxAccess {
 
         credentials.remember(address, secret);
         client.forgetSession(address);
-        session.setAttribute(SESSION_KEY, address);
+        // Same monitor openIfUnset uses. This one still overwrites whatever was
+        // pinned, which is what choosing a mailbox by hand is supposed to do; the
+        // lock is only here so the two cannot interleave inside the pin itself.
+        synchronized (session) {
+            session.setAttribute(SESSION_KEY, address);
+        }
         return address;
+    }
+
+    /**
+     * Opens a mailbox only if this session has not already chosen one, and answers
+     * the address it opened or null if it left the session alone.
+     *
+     * This is for LoginLandingHandler and nothing else. That handler offers the
+     * password that just worked to the mail server on a virtual thread that outlives
+     * the redirect, so its answer can arrive long after the person has reached the
+     * mailbox screen and opened a different mailbox by hand. open() pins
+     * unconditionally, so the late thread would quietly re-pin the session to the
+     * first address, the screen would still name the second, and the next message
+     * would go out from the wrong identity with nothing recorded to say why.
+     *
+     * The session test is done twice deliberately. The first is a cheap way out that
+     * also saves a pointless round trip to Stalwart when the question is already
+     * settled. The second is inside the monitor and after the probe, and it is the
+     * one that closes the race, because the whole point is that somebody may have
+     * chosen a mailbox while the probe was in flight. Nothing is written to the
+     * process-wide credential store either when this declines, so an unasked-for
+     * password does not end up resident in heap.
+     */
+    public String openIfUnset(HttpSession session, String mailbox, String secret) {
+        if (session == null || secret == null || secret.isEmpty()) return null;
+        String address = normalise(mailbox);
+        if (session.getAttribute(SESSION_KEY) != null) return null;
+        if (!client.probe(address, secret)) return null;
+
+        synchronized (session) {
+            if (session.getAttribute(SESSION_KEY) != null) return null;
+            credentials.remember(address, secret);
+            client.forgetSession(address);
+            session.setAttribute(SESSION_KEY, address);
+        }
+        return address;
+    }
+
+    /**
+     * Asks the mail server whether an address and secret are a real login, and
+     * changes nothing whatever the answer is.
+     *
+     * MailboxAuthenticationProvider needs the same verified path open() uses, but
+     * at the point it runs there is no session worth pinning: Spring Security is
+     * about to throw this one away and issue a new one, so anything written here
+     * would be lost. So the check is split out and the pinning stays in open(),
+     * which the login success handler calls afterwards against the session the user
+     * will actually keep.
+     *
+     * It answers false rather than propagating, including when the mail server is
+     * unreachable. The caller turns that into a plain bad-password failure, which is
+     * the one shape of failure that still reaches LoginAttemptListener, so an outage
+     * over here can never quietly disable the lockout counter over there.
+     */
+    public boolean accepts(String mailbox, String secret) {
+        try {
+            return client.probe(normalise(mailbox), secret);
+        } catch (MailException e) {
+            return false;
+        }
     }
 
     /**
@@ -124,10 +208,10 @@ public class MailboxAccess {
     }
 
     /**
-     * Only real addresses, and only on our own domain unless the domain lock is
-     * cleared. Stalwart holds no accounts anywhere else, so an unrestricted address
-     * here would just be a way for a signed-in user to fill this process's credential
-     * map with junk keys.
+     * Only real addresses, and only on our own domain. Stalwart holds no accounts
+     * anywhere else, so an unrestricted address here would just be a way for a
+     * signed-in user to fill this process's credential map with junk keys. The domain
+     * test has no escape hatch any more; the constructor refuses to start without one.
      */
     private String normalise(String mailbox) {
         String address = mailbox == null ? "" : mailbox.trim().toLowerCase(Locale.ROOT);
@@ -136,7 +220,7 @@ public class MailboxAccess {
                 || address.indexOf(' ') >= 0) {
             throw new MailException(MailException.Kind.PROTOCOL, "That is not a mailbox address.");
         }
-        if (!domain.isEmpty() && !address.endsWith("@" + domain)) {
+        if (!address.endsWith("@" + domain)) {
             throw new MailException(MailException.Kind.PROTOCOL,
                     "Only " + domain + " mailboxes can be opened here.");
         }

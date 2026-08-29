@@ -3,51 +3,255 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Sign in | JCF Campaign Studio</title>
+    <title>Sign in | Jarurat Mail</title>
     <link rel="stylesheet" href="/css/style.css">
     <link rel="icon" href="/logo.png">
+    <th:block th:replace="~{fragments/pwa :: head}"></th:block>
+
+    <style>
+        /* ==================================================================
+           Sign in. Two panels on a laptop, one centred card on a phone.
+
+           Controls, alerts and every colour token come from
+           static/css/style.css so this page cannot drift from the console.
+           Only the shapes that exist nowhere else are defined here.
+           ================================================================== */
+
+        /* .ic, .ic-lg and .ic-sm are section 6 of docs/UI-SPEC.md and now live in
+           style.css, which both entry pages load. mail.html keeps its own copy
+           because it loads no stylesheet; these two must not, or the icon set
+           quietly forks between the pages a person walks through in one session. */
+
+        .si { min-height: 100vh; min-height: 100dvh; display: grid; grid-template-columns: 1fr; }
+        .si a { text-decoration: none; }
+        .si a:hover { text-decoration: none; }
+
+        /* ---------- left panel: brand, laptop only ---------- */
+        /* --surface is the spec name for the sunken ground and style.css still
+           calls it --sidebar-bg. Both are read, so this panel keeps its colour
+           whichever name that file is carrying when it is next opened. */
+        .si-brand { display: none; }
+
+        .si a.si-home { display: inline-flex; align-items: center; gap: 12px; color: var(--text); }
+        .si-tile { width: 44px; height: 44px; border-radius: 12px; background: #fff; flex: none;
+                   display: grid; place-items: center; box-shadow: 0 1px 2px rgba(0, 0, 0, .32); }
+        /* The app icon is black ink on transparency, so it needs its own white
+           ground. It is also the exact tile that ends up on the home screen. */
+        .si-tile img { width: 34px; height: 34px; display: block; }
+        .si-nm { font-size: 15px; font-weight: 620; line-height: 1.25;
+                 letter-spacing: -.01em; color: var(--text); }
+        .si-nm small { display: block; font-weight: 400; font-size: 11.5px;
+                       letter-spacing: 0; color: var(--text-mute); }
+        .si-line { margin: 0; font-size: 16px; line-height: 1.6; letter-spacing: -.01em;
+                   color: var(--text-dim); max-width: 24em; }
+        /* --text-mute, not --text-faint: at 12px on --surface the faint token
+           measures 4.18:1 against a 4.5:1 floor. Measured, not guessed. */
+        .si-brandfoot { margin: 0; font-size: 12px; color: var(--text-mute); }
+
+        /* ---------- right panel: the form ---------- */
+        .si-form { display: flex; padding: 24px 20px; background: var(--bg); }
+        /* margin:auto rather than align-items:center. A centred flex item whose
+           content outgrows the viewport has its top cut off and unreachable;
+           an auto margin gives the same centring and then yields. */
+        .si-card { margin: auto; width: 100%; max-width: 420px; padding: 24px 20px 20px;
+                   background: var(--panel); border: 1px solid var(--border);
+                   border-radius: var(--r-md, 12px); box-shadow: var(--e3, 0 12px 34px rgba(0, 0, 0, .50));
+                   animation: si-in .22s cubic-bezier(.2, .7, .3, 1); }
+        @keyframes si-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+        .si-cardmark { display: flex; align-items: center; gap: 11px; margin-bottom: 22px; }
+
+        .si-h1 { margin: 0 0 6px; font-size: 20px; font-weight: 640;
+                 letter-spacing: -.02em; color: var(--text); }
+        .si-sub { margin: 0 0 20px; font-size: 13.5px; line-height: 1.55; color: var(--text-mute); }
+
+        .si-fld { margin-bottom: 14px; }
+        .si-lbl { display: block; font-size: 12px; font-weight: 600;
+                  color: var(--text-dim); margin-bottom: 6px; }
+        /* 16px at every width, not only under the 760px query in style.css. Under
+           it iOS Safari zooms the whole page on focus and never zooms back, and
+           an 850px tablet is just as much an iPad as a 390px phone is. */
+        .si .si-in { min-height: 44px; font-size: 16px; padding: 9px 12px;
+                     border-radius: var(--r-sm, 8px); }
+
+        .si-peekwrap { position: relative; display: flex; }
+        .si-peekwrap .si-in { flex: 1 1 auto; min-width: 0; padding-right: 48px; }
+        .si-peek { position: absolute; top: 0; right: 0; height: 100%; width: 44px;
+                   display: grid; place-items: center; padding: 0;
+                   background: none; border: 0; border-radius: var(--r-sm, 8px);
+                   color: var(--text-mute); cursor: pointer; }
+        .si-peek:hover { color: var(--text); }
+        .si-peek:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+
+        .si-go { width: 100%; min-height: 46px; margin-top: 6px;
+                 font-size: 14.5px; border-radius: var(--r-sm, 8px); }
+
+        .si-help { margin: 18px 0 0; padding-top: 16px; border-top: 1px solid var(--border);
+                   font-size: 12.5px; line-height: 1.55; color: var(--text-mute); }
+
+        /* ---------- laptop ---------- */
+        @media (min-width: 900px) {
+            .si { grid-template-columns: minmax(0, 46fr) minmax(0, 54fr); }
+
+            .si-brand {
+                display: grid; grid-template-rows: auto 1fr auto; gap: 24px; padding: 56px;
+                background: var(--surface, var(--sidebar-bg, #1b1b1b));
+                border-right: 1px solid var(--border);
+            }
+            /* Blockified by the grid otherwise, which would stretch the hit area of
+               a 200px lockup across the whole panel. */
+            .si-brand .si-home { justify-self: start; }
+            .si-line { align-self: center; font-size: 20px; line-height: 1.5;
+                       letter-spacing: -.02em; max-width: 15em; }
+            .si-brand .si-tile { width: 56px; height: 56px; border-radius: 14px;
+                                 box-shadow: 0 12px 34px rgba(0, 0, 0, .50); }
+            .si-brand .si-tile img { width: 44px; height: 44px; }
+
+            /* .si a.si-home carries display:inline-flex, and a media query adds no
+               specificity, so hiding this needs to match on the anchor too. */
+            .si a.si-cardmark { display: none; }
+
+            /* The right panel is the card, so the card stops being one. */
+            .si-form { background: var(--panel); padding: 48px; }
+            .si-card { max-width: 360px; padding: 0; background: none;
+                       border: 0; box-shadow: none; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .si-card { animation: none; }
+        }
+    </style>
 </head>
 <body>
-<div class="aurora-bg"></div>
+<th:block th:replace="~{fragments/icons :: sprite}"></th:block>
 
-<div class="auth-wrap">
-    <div class="auth-card">
-        <div style="display:flex;align-items:center;gap:11px;margin-bottom:24px">
-            <div class="brand-mark">JC</div>
-            <div class="brand-text">Campaign Studio<small>Jarurat Care Foundation</small></div>
-        </div>
+<div class="si">
 
-        <h2 style="margin:0 0 6px;font-size:20px;letter-spacing:-0.02em">Sign in</h2>
-        <p style="margin:0 0 20px;color:var(--text-mute);font-size:13px">
-            Use the account your administrator created for you.
+    <section class="si-brand">
+        <a class="si-home" href="/">
+            <span class="si-tile"><img src="/icons/icon-192.png" alt="" width="44" height="44"></span>
+            <span class="si-nm">Jarurat Mail<small>Jarurat Care Foundation</small></span>
+        </a>
+        <p class="si-line">
+            The same jarurat.care address on your phone and on your laptop, with
+            everything you have already sent and received.
         </p>
+        <p class="si-brandfoot">Jarurat Care Foundation</p>
+    </section>
 
-        <div class="alert" th:if="${param.error}">
-            That email and password combination did not work. After five failed
-            attempts the account locks for fifteen minutes.
+    <main class="si-form">
+        <div class="si-card">
+
+            <a class="si-home si-cardmark" href="/">
+                <span class="si-tile"><img src="/icons/icon-192.png" alt="" width="34" height="34"></span>
+                <span class="si-nm">Jarurat Mail<small>Jarurat Care Foundation</small></span>
+            </a>
+
+            <h1 class="si-h1">Sign in</h1>
+            <p class="si-sub">Your jarurat.care address and the password that goes with it. This is your own mailbox.</p>
+
+            <div class="alert" th:if="${param.error}">
+                That email and password combination did not work. After five failed
+                attempts the account locks for fifteen minutes.
+            </div>
+            <div class="alert ok" th:if="${param.loggedOut}">You have been signed out.</div>
+            <!-- Set by the Campaign Studio row on the landing page, so the person
+                 who chose the console knows why it will want a bigger screen. -->
+            <div class="alert info" th:if="${param.desktop}">
+                Campaign Studio is built for a laptop screen. Your mailbox works on any screen.
+            </div>
+
+            <form th:action="@{/login}" method="post" id="siForm">
+                <div class="si-fld">
+                    <label class="si-lbl" for="siEmail">Email address</label>
+                    <input class="input si-in" id="siEmail" name="email" type="email" required
+                           autocomplete="username" inputmode="email" enterkeyhint="next"
+                           autocapitalize="off" autocorrect="off" spellcheck="false"
+                           placeholder="you@jarurat.care">
+                </div>
+
+                <div class="si-fld">
+                    <label class="si-lbl" for="siPw">Password</label>
+                    <div class="si-peekwrap">
+                        <input class="input si-in" id="siPw" name="password" type="password" required
+                               autocomplete="current-password" enterkeyhint="go">
+                        <button class="si-peek" type="button" id="siPeek" aria-controls="siPw"
+                                aria-label="Show password" aria-pressed="false">
+                            <svg class="ic" aria-hidden="true"><use href="#i-eye"/></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Carries the "Campaign Studio" choice from the landing page through
+                     the sign in. It cannot ride on the session instead: session fixation
+                     protection issues a new session on success and copies only attributes
+                     whose names begin with SPRING_SECURITY_, so anything the GET stored
+                     is gone by the time the landing page is chosen. Read back by
+                     DeviceHints.prefersDesktop off the POST, after the new session
+                     exists, which is why a phone that asked for the console now gets it. -->
+                <input type="hidden" name="desktop" th:if="${param.desktop}" th:value="${param.desktop[0]}">
+
+                <!-- th:action injects the CSRF hidden field automatically; adding one by
+                     hand renders it twice and sends a duplicated parameter. -->
+                <button type="submit" class="btn btn-primary si-go" id="siGo">Sign in</button>
+            </form>
+
+            <p class="si-help">
+                No account yet, or the password stopped working? Ask whoever set up
+                your address at the foundation.
+            </p>
         </div>
-        <div class="alert ok" th:if="${param.loggedOut}">You have been signed out.</div>
-
-        <form th:action="@{/login}" method="post">
-            <label class="field">
-                <span>Email address</span>
-                <input class="input" type="email" name="email" placeholder="you@jarurat.care" required autofocus>
-            </label>
-            <label class="field">
-                <span>Password</span>
-                <input class="input" type="password" name="password" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" required>
-            </label>
-            <!-- th:action injects the CSRF hidden field automatically; adding one by
-                 hand renders it twice and sends a duplicated parameter. -->
-            <button type="submit" class="btn btn-primary" style="width:100%;margin-top:4px;padding:11px">
-                Sign in
-            </button>
-        </form>
-
-        <p style="margin:18px 0 0;font-size:11.5px;color:var(--text-mute);text-align:center">
-            Amazon SES &middot; ap-south-1 &middot; sessions expire after 8 hours
-        </p>
-    </div>
+    </main>
 </div>
+
+<script>
+    (function () {
+        var pw = document.getElementById('siPw');
+        var peek = document.getElementById('siPeek');
+        if (pw && peek) {
+            var use = peek.querySelector('use');
+            /* Focus deliberately stays on the button. A control whose own pressed
+               state has just changed has to keep focus for that change to be
+               announced, and someone reaching this with the keyboard is not done
+               with it after one press. */
+            peek.addEventListener('click', function () {
+                var reveal = pw.type === 'password';
+                pw.type = reveal ? 'text' : 'password';
+                use.setAttribute('href', reveal ? '#i-eye-off' : '#i-eye');
+                peek.setAttribute('aria-pressed', reveal ? 'true' : 'false');
+                peek.setAttribute('aria-label', reveal ? 'Hide password' : 'Show password');
+            });
+        }
+
+        /* autofocus as an attribute would fire on a phone too, where it opens the
+           keyboard over the whole page on arrival, before anyone has decided to
+           type anything. */
+        if (window.matchMedia && window.matchMedia('(min-width: 900px)').matches) {
+            var email = document.getElementById('siEmail');
+            if (email && !email.value) email.focus();
+        }
+
+        var form = document.getElementById('siForm');
+        var go = document.getElementById('siGo');
+        if (form && go) {
+            form.addEventListener('submit', function () {
+                /* Disabled in a later task rather than inside the handler: a submit
+                   control disabled while its own submit event is still running is
+                   dropped from the request by some engines. */
+                window.setTimeout(function () {
+                    go.disabled = true;
+                    go.textContent = 'Signing in...';
+                }, 0);
+            });
+            /* Coming back to this page with the browser's own Back restores it from
+               the cache exactly as it was left, disabled button included, and the
+               form would then be dead with nothing on screen saying why. */
+            window.addEventListener('pageshow', function (e) {
+                if (e.persisted) { go.disabled = false; go.textContent = 'Sign in'; }
+            });
+        }
+    })();
+</script>
+<th:block th:replace="~{fragments/pwa :: script}"></th:block>
 </body>
 </html>

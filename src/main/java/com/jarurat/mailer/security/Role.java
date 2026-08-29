@@ -47,7 +47,16 @@ public enum Role {
     VIEWER("Viewer", "Read only across reporting",
             EnumSet.of(SUBSCRIBERS_READ, LISTS_READ, CAMPAIGNS_READ,
                     TEMPLATES_READ, TRANSACTIONAL_READ, SUPPRESSION_READ,
-                    ANALYTICS_READ, MESSAGELOG_READ));
+                    ANALYTICS_READ, MESSAGELOG_READ)),
+
+    // Granted only by MailboxAuthenticationProvider, to somebody who proved a
+    // mailbox password to Stalwart and nothing else. It is deliberately the
+    // smallest set in this enum: a mailbox password buys its own mailbox, the same
+    // thing it already buys in any IMAP client, and it never buys the ability to
+    // send a campaign. Adding a permission here widens what every mail password in
+    // the organisation is worth, so nothing goes in without that being the intent.
+    MAILBOX("Mailbox", "Mail only sign in, no access to Campaign Studio",
+            EnumSet.of(MAIL_READ, MAIL_SEND));
 
     private final String label;
     private final String description;

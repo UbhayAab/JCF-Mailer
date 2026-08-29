@@ -3,7 +3,6 @@ package com.jarurat.mailer.security;
 import com.jarurat.mailer.models.User;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
-import org.springframework.security.core.userdetails.UserDetails;
 
 import java.util.Collection;
 import java.util.List;
@@ -12,7 +11,7 @@ import java.util.List;
  * Authorities are the role's permissions, not the role name, so endpoints can
  * say hasAuthority('CAMPAIGNS_SEND') and stay correct when roles change.
  */
-public class AppUserDetails implements UserDetails {
+public class AppUserDetails implements SignedInUser {
 
     private final User user;
     private final List<GrantedAuthority> authorities;
@@ -25,8 +24,8 @@ public class AppUserDetails implements UserDetails {
     }
 
     public User getUser() { return user; }
-    public Role getRole() { return user.getRole(); }
-    public String getFullName() { return user.getFullName(); }
+    @Override public Role getRole() { return user.getRole(); }
+    @Override public String getFullName() { return user.getFullName(); }
 
     @Override public Collection<? extends GrantedAuthority> getAuthorities() { return authorities; }
     @Override public String getPassword() { return user.getPasswordHash(); }

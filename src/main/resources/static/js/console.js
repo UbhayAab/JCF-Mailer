@@ -96,10 +96,203 @@ function statusPill(status) {
   return '<span class="pill ' + (map[status] || 'pill-draft') + '">' + esc(status) + '</span>';
 }
 
-function emptyRow(cols, message) {
-  return '<tr><td colspan="' + cols + '"><div class="empty"><span class="big">&#9675;</span>'
-       + esc(message) + '</div></td></tr>';
+/* ---------- values that four screens render the same way ---------- */
+
+/** SES and SESv2 hand their enums back in screaming case - HEALTHY, SUCCESS,
+    PENDING - while every neighbouring value in the same panel is a word we chose
+    and wrote as a word: Production, Enabled, Yes. Printing both untouched put
+    three casings into one four-row panel and made the shouting look like it
+    carried a meaning it does not. The wire format is normalised on the way out.
+    A value that already has lower case in it was written for a human, so it is
+    returned unchanged; the comparisons that drive colour still read the raw
+    field, never this. */
+function statusWord(value) {
+  const raw = String(value === null || value === undefined ? '' : value).trim();
+  if (!raw || !/^[A-Z][A-Z0-9_ -]*$/.test(raw)) return raw;
+  return raw.toLowerCase().replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
 }
+
+/** mail.js already settled this for the unread tab badge: a badge reading zero is
+    noise, because a missing badge says the same thing and says it quietly. The
+    rail badges each printed 0 from the template until their view was first
+    opened, so Mailboxes and Journeys sat in the nav announcing nothing. One
+    writer, one rule. */
+function setNavBadge(id, count) {
+  const badge = $(id);
+  if (!badge) return;
+  const n = Number(count) || 0;
+  badge.textContent = num(n);
+  badge.hidden = n <= 0;
+}
+
+/* ---------- chart ink ----------
+
+   UI-SPEC section 2 owns these values. A CSS custom property cannot be read from
+   inside an SVG attribute string, so every colour drawn by this file has to be a
+   hand copy of the token, and a hand copy spread over nine call sites is exactly
+   how the palette drifted last time. Collecting them here gives a token change in
+   style.css one place to land on this side. */
+const CHART_INK = {
+  series1:     '#2f6fed',                // --primary, the first series
+  series1Fill: 'rgba(47,111,237,.14)',   // --primary under the first series
+  series2:     '#19a7a0',                // --accent, which section 2 allows in a chart and nowhere else
+  rest:        '#343434',                // --panel-4, the unengaged remainder of the donut
+  grid:        'rgba(255,255,255,.075)', // --border
+  label:       '#ededed',                // --text
+  labelDim:    '#949494'                 // --text-mute
+};
+
+/** A line chart prints its final x label unconditionally, so a series always
+    names the day it ends on. When the thinning step does not divide the series
+    evenly that forced label lands one point after the previous one instead of a
+    whole step after it, and the two run together. At 30 days on a 1440px window
+    the last two dates overlapped by 7.5px and painted as one run of digits.
+
+    This measures the boxes the browser actually painted rather than recomputing
+    the chart's own geometry, so it stays correct whoever changes the padding, and
+    it works on a chart drawn by charts.js as well as the one drawn here. Dropping
+    the tick is the right loss: the last day of the window is already printed above
+    the chart in words. */
+function dropCollidingAxisLabels(host, gutter) {
+  if (!host) return;
+  const svg = host.tagName === 'svg' ? host : host.querySelector('svg');
+  if (!svg) return;
+  // text-anchor separates the x labels from the y labels in both charts: the
+  // gridline numbers are anchored end, the date ticks are anchored middle.
+  const labels = Array.prototype.slice.call(svg.querySelectorAll('text.chart-axis'))
+    .filter(t => t.getAttribute('text-anchor') === 'middle')
+    .map(t => ({ el: t, box: t.getBoundingClientRect() }))
+    .sort((a, b) => a.box.left - b.box.left);
+  // A chart inside a view that is display:none measures zero on every box, and
+  // reading that as a collision would strip every label off the chart.
+  if (labels.length < 2 || labels.some(l => l.box.width === 0)) return;
+
+  const gap = gutter === undefined ? 4 : gutter;
+  let keptRight = labels[0].box.right;
+  for (let i = 1; i < labels.length; i++) {
+    if (labels[i].box.left < keptRight + gap) labels[i].el.remove();
+    else keptRight = labels[i].box.right;
+  }
+}
+
+/* ---------- the three states every list owes the reader ----------
+
+   Section 9 of the UI spec: a list is never a blank box. It is skeleton rows
+   while it loads, a designed empty state carrying the action that fills it when
+   there is nothing, and a plain sentence plus a Retry that really retries when
+   the request failed. All three are built here rather than in each of the
+   seventeen loaders, so a loader written later inherits them by calling one
+   function instead of by remembering three shapes.
+
+   The circle character these used to draw was a font glyph, which means the
+   device chose how it looked. Every icon below is a symbol we ship. */
+
+const SKELETON_WIDTHS = ['68%', '44%', '86%', '52%', '74%', '38%', '92%', '60%', '48%'];
+
+function skeletonRows(cols, rows) {
+  const count = rows || 6;
+  let out = '';
+  for (let r = 0; r < count; r++) {
+    let cells = '';
+    for (let c = 0; c < cols; c++) {
+      // Widths cycle over a fixed list rather than Math.random, so two renders
+      // of the same wait look the same and the block never reads as a barcode.
+      // The height is inline because .skeleton in style.css deliberately sets
+      // none: it is a shimmer, sized by whatever context it lands in, and the
+      // context here is a table cell rather than that file's .skeleton-row grid.
+      cells += '<td><span class="skeleton" style="height:11px;width:'
+             + SKELETON_WIDTHS[(r * cols + c) % SKELETON_WIDTHS.length] + '"></span></td>';
+    }
+    out += '<tr data-skeleton aria-hidden="true">' + cells + '</tr>';
+  }
+  return out;
+}
+
+/* Skipped when the table already holds real rows. A skeleton belongs to the
+   wait with nothing behind it; flashing one over live data on a 60 second poll
+   or on every keystroke of a debounced search reads as the screen resetting
+   itself. Callers that genuinely want the bars over old content, such as the
+   mailbox screen, write skeletonRows directly. */
+function showSkeleton(bodyId, cols, rows) {
+  const body = $(bodyId);
+  if (!body) return;
+  if (body.querySelector('tr:not([data-skeleton]):not(.state-row)')) return;
+  const table = body.closest('table.data');
+  if (table) table.setAttribute('aria-busy', 'true');
+  body.innerHTML = skeletonRows(cols, rows);
+}
+
+function stateBody(kind, icon, message, action) {
+  return '<div class="empty' + (kind ? ' ' + kind : '') + '">'
+       + '<svg class="ic ic-32" aria-hidden="true"><use href="#' + icon + '"/></svg>'
+       + '<b>' + esc(message) + '</b>'
+       + (action || '')
+       + '</div>';
+}
+
+function stateCell(cols, kind, icon, message, action) {
+  return '<tr class="state-row"><td colspan="' + cols + '">'
+       + stateBody(kind, icon, message, action) + '</td></tr>';
+}
+
+function emptyState(cols, icon, message, action) {
+  return stateCell(cols, '', icon, message, action);
+}
+
+/* journey.js builds its four tables against this signature, so it keeps the
+   two argument shape and picks a neutral icon. */
+function emptyRow(cols, message) { return emptyState(cols, 'i-info', message, ''); }
+
+function errorRow(cols, message, retryCall) {
+  return stateCell(cols, 'error', 'i-warn', message, retryButton(retryCall));
+}
+
+function retryButton(retryCall) {
+  return retryCall ? '<button class="btn btn-sm" onclick="' + attr(retryCall) + '">Retry</button>' : '';
+}
+
+/* The panel equivalents, for the screen that renders cards rather than a table. */
+function emptyPanel(icon, message, action) {
+  return '<div class="panel"><div class="panel-body">' + stateBody('', icon, message, action) + '</div></div>';
+}
+
+function errorPanel(message, retryCall) {
+  return '<div class="panel"><div class="panel-body">'
+       + stateBody('error', 'i-warn', message, retryButton(retryCall)) + '</div></div>';
+}
+
+function actionBtn(label, call, primary) {
+  return '<button class="btn btn-sm' + (primary ? ' btn-primary' : '')
+       + '" onclick="' + attr(call) + '">' + esc(label) + '</button>';
+}
+
+function focusField(id) {
+  const el = $(id);
+  if (!el) return;
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  el.focus();
+}
+
+/* True when at least one filter control is carrying a value, which is the whole
+   difference between "there is nothing here" and "nothing matched", and so
+   between offering Create and offering Clear. */
+function filtersSet(ids) {
+  return ids.some(id => { const el = $(id); return !!(el && el.value); });
+}
+
+/* The action that fills a table filtered down to nothing is not "create one
+   more", it is putting the filters back. Each screen resets its own controls
+   and its own page index, because clearing a filter while sitting on page four
+   otherwise lands on a page that is still empty. */
+function resetRecipientFilters() { $('rSearch').value = ''; $('rStatus').value = ''; recipientPage = 0; loadRecipients(); }
+function resetSubscriberFilters() { $('sSearch').value = ''; $('sList').value = ''; $('sStatus').value = ''; subscriberPage = 0; loadSubscribers(); }
+function resetSuppressionFilters() { $('supSearch').value = ''; $('supReason').value = ''; suppressionPage = 0; loadSuppressions(); }
+function resetTemplateFilter() { $('tType').value = ''; loadTemplates(); }
+function resetTransactionalFilters() { $('txSearch').value = ''; $('txStatus').value = ''; transactionalPage = 0; loadTransactional(); }
+function resetAuditFilter() { $('aSearch').value = ''; auditPage = 0; loadAudit(); }
+function resetVerifyFilters() { $('verifySearch').value = ''; $('verifyVerdict').value = ''; verifyPage = 0; loadVerifyResults(); }
+function resetMessageLogFilters() { $('mlSearch').value = ''; $('mlOutcome').value = ''; $('mlDirection').value = ''; messageLogPage = 0; loadMessageLog(); }
+function resetSegmentFilter() { $('segSearch').value = ''; segmentPage = 0; loadSegmentPeople(); }
 
 function pagerText(data) {
   return num(data.totalElements) + ' total, page ' + (data.page + 1)
@@ -112,9 +305,76 @@ function closeModal(id) { $(id).classList.remove('open'); }
 document.addEventListener('click', e => {
   if (e.target.classList && e.target.classList.contains('modal-backdrop')) e.target.classList.remove('open');
 });
+/* One Escape handler, so it can close the topmost thing rather than everything
+   at once. Split across two listeners, closing a modal would also close the
+   drawer sitting behind it. */
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') document.querySelectorAll('.modal-backdrop.open').forEach(m => m.classList.remove('open'));
+  if (e.key !== 'Escape') return;
+  const open = document.querySelectorAll('.modal-backdrop.open');
+  if (open.length) { open.forEach(m => m.classList.remove('open')); return; }
+  closeDrawer();
 });
+
+/* ---------- the phone navigation drawer ----------
+
+   Below 900px the rail slides in from the left over a scrim instead of standing
+   as a permanent column. style.css owns every pixel of that; this owns exactly
+   one piece of state, drawer-open on <body>, plus the reach rules a transform
+   cannot express. */
+
+const navMedia = window.matchMedia('(max-width: 900px)');
+
+/* A drawer parked off canvas by a transform is still in the tab order and still
+   read out, so focus walks into a menu nobody can see. Above the breakpoint the
+   same element is the permanent rail and must stay reachable, which is why this
+   is re-evaluated on every media change rather than decided once at boot. */
+function syncDrawerReach() {
+  const drawer = $('navDrawer');
+  if (!drawer) return;
+  const hidden = navMedia.matches && !document.body.classList.contains('drawer-open');
+  if ('inert' in drawer) drawer.inert = hidden;
+  if (hidden) drawer.setAttribute('aria-hidden', 'true');
+  else drawer.removeAttribute('aria-hidden');
+}
+
+function setDrawer(open) {
+  document.body.classList.toggle('drawer-open', open);
+  const toggle = $('navToggle');
+  if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+  syncDrawerReach();
+}
+
+function openDrawer() {
+  setDrawer(true);
+  const drawer = $('navDrawer');
+  const first = drawer && drawer.querySelector('.nav-item');
+  if (first) first.focus();
+}
+
+/* restoreFocus is false only when the drawer is closed by something the reader
+   did not do, such as rotating past the breakpoint, where pulling focus onto a
+   control that has just become invisible would be a jump with no cause. */
+function closeDrawer(restoreFocus) {
+  if (!document.body.classList.contains('drawer-open')) { syncDrawerReach(); return; }
+  setDrawer(false);
+  if (restoreFocus !== false) { const toggle = $('navToggle'); if (toggle) toggle.focus(); }
+}
+
+(function wireNavDrawer() {
+  const toggle = $('navToggle');
+  if (toggle) toggle.addEventListener('click', () => {
+    if (document.body.classList.contains('drawer-open')) closeDrawer(); else openDrawer();
+  });
+
+  const scrim = document.querySelector('.scrim');
+  if (scrim) scrim.addEventListener('click', () => closeDrawer());
+
+  const onBreakpoint = () => closeDrawer(false);
+  if (navMedia.addEventListener) navMedia.addEventListener('change', onBreakpoint);
+  else if (navMedia.addListener) navMedia.addListener(onBreakpoint);
+
+  syncDrawerReach();
+})();
 
 /* ---------- permission gating ---------- */
 function applyPermissions() {
@@ -140,12 +400,21 @@ document.querySelectorAll('.nav-item').forEach(item => {
   // browser navigates away.
   if (item.tagName === 'A') return;
   item.addEventListener('click', () => go(item.dataset.view));
+  // These rows are divs advertising role="button", so Enter and Space have to be
+  // wired by hand. A real button would give them for free, but it also brings a
+  // user agent box that every rail rule would then have to undo.
+  item.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      go(item.dataset.view);
+    }
+  });
 });
 
 const LOADERS = {
   overview: loadOverview,
   campaigns: loadCampaigns,
-  composer: () => loadLists().then(fillListPickers),
+  composer: () => { primeComposerTables(); return loadLists().then(fillListPickers); },
   lists: loadLists,
   subscribers: () => loadLists().then(fillListPickers).then(loadSubscribers),
   suppression: loadSuppressions,
@@ -161,9 +430,32 @@ const LOADERS = {
   domains: loadDomains
 };
 
+/* Link performance and Recipients belong to a campaign, and there is no campaign
+   until one is opened or saved, so neither loader runs on a cold visit to the
+   composer and both tables used to sit as a heading with nothing under them. */
+function primeComposerTables() {
+  if (currentCampaignId) return;
+  $('linkBody').innerHTML = emptyState(3, 'i-analytics', 'No clicks recorded yet.', '');
+  $('recipientBody').innerHTML = emptyState(6, 'i-users',
+    'Nobody is queued yet. Choose an audience in step 3, then save the campaign.', '');
+}
+
 function go(view) {
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+  document.querySelectorAll('.nav-item').forEach(n => {
+    const on = n.dataset.view === view;
+    n.classList.toggle('active', on);
+    if (on) n.setAttribute('aria-current', 'page'); else n.removeAttribute('aria-current');
+  });
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + view));
+
+  // Once the rail is a drawer the phone topbar is the only place the current
+  // section is named, and it is read off the heading rather than kept as a
+  // second table of labels that would drift from the markup.
+  const heading = document.querySelector('#view-' + view + ' .topbar h1');
+  const title = $('mobileTitle');
+  if (title && heading) title.textContent = heading.textContent.trim();
+
+  closeDrawer();
   window.scrollTo({ top: 0, behavior: 'smooth' });
   if (LOADERS[view]) LOADERS[view]();
 }
@@ -172,8 +464,14 @@ function go(view) {
    Overview
    ========================================================================= */
 async function loadOverview() {
+  showSkeleton('activityBody', 4, 5);
   let d;
-  try { d = await api('/api/overview'); } catch (e) { toast('Could not load the overview', 'err'); return; }
+  try { d = await api('/api/overview'); }
+  catch (e) {
+    $('activityBody').innerHTML = errorRow(4, e.message || 'Could not load the overview.', 'loadOverview()');
+    toast('Could not load the overview', 'err');
+    return;
+  }
 
   // The server omits any metric this role may not see, so only build tiles for
   // fields that actually came back.
@@ -181,9 +479,14 @@ async function loadOverview() {
   const px = (key, tile) => { if (d[key] !== undefined) tiles.push(tile); };
   px('subscribers', { label: 'Subscribers', value: num(d.subscribers), foot: num(d.subscribedCount) + ' mailable', cls: '' });
   px('lists', { label: 'Lists', value: num(d.lists), foot: num(d.campaigns || 0) + ' campaigns', cls: '' });
-  px('totalSent', { label: 'Emails sent', value: num(d.totalSent), foot: num(d.campaignsScheduled) + ' scheduled', cls: 'good' });
-  px('openRate', { label: 'Open rate', value: d.openRate + '%', foot: num(d.totalOpened) + ' opened', cls: 'accent' });
-  px('clickRate', { label: 'Click rate', value: d.clickRate + '%', foot: num(d.totalClicked) + ' clicked', cls: 'accent' });
+  // A tile spends colour only where the number is one to act on, which on this row
+  // is Unsubscribed and Bounced and nothing else. Emails sent, Open rate and Click
+  // rate carried green and teal as decoration, and section 2 confines --accent to a
+  // chart series in any case, so eight tiles were showing five hues with nothing on
+  // screen saying which two of them meant anything.
+  px('totalSent', { label: 'Emails sent', value: num(d.totalSent), foot: num(d.campaignsScheduled) + ' scheduled', cls: '' });
+  px('openRate', { label: 'Open rate', value: d.openRate + '%', foot: num(d.totalOpened) + ' opened', cls: '' });
+  px('clickRate', { label: 'Click rate', value: d.clickRate + '%', foot: num(d.totalClicked) + ' clicked', cls: '' });
   px('transactionalTotal', { label: 'Transactional', value: num(d.transactionalTotal), foot: num(d.transactional24h) + ' in 24h', cls: '' });
   px('unsubscribed', { label: 'Unsubscribed', value: num(d.unsubscribed), foot: 'suppressed permanently', cls: 'warn' });
   px('bounced', { label: 'Bounced', value: num(d.bounced + d.complaints), foot: 'bounces and complaints', cls: 'danger' });
@@ -195,15 +498,17 @@ async function loadOverview() {
   $('activityBody').innerHTML = d.activity.length ? d.activity.map(a =>
     '<tr><td><strong>' + esc(a.actor) + '</strong></td><td>' + esc(a.action.replace(/_/g, ' ').toLowerCase())
     + '</td><td class="truncate">' + esc(a.target) + '</td><td class="mono">' + esc(a.at) + '</td></tr>').join('')
-    : emptyRow(4, can('AUDIT_READ') ? 'No activity recorded yet.' : 'Your role does not include the audit trail.');
+    : emptyState(4, 'i-clock',
+        can('AUDIT_READ') ? 'No activity recorded yet. Everything anyone does here lands in this list.'
+                          : 'Your role does not include the audit trail.', '');
 
   drawOverviewCharts(d);
 
   renderSes(d.ses);
   renderIdentity(d.identity);
-  if (d.unsubscribed !== undefined) $('badgeSuppression').textContent = num(d.unsubscribed + d.bounced + d.complaints);
-  if (d.campaigns !== undefined) $('badgeCampaigns').textContent = num(d.campaigns);
-  if (d.lists !== undefined) $('badgeLists').textContent = num(d.lists);
+  if (d.unsubscribed !== undefined) setNavBadge('badgeSuppression', d.unsubscribed + d.bounced + d.complaints);
+  if (d.campaigns !== undefined) setNavBadge('badgeCampaigns', d.campaigns);
+  if (d.lists !== undefined) setNavBadge('badgeLists', d.lists);
 }
 
 function renderSes(s) {
@@ -221,7 +526,7 @@ function renderSes(s) {
 
   $('sesPanel').innerHTML =
     row('Access level', s.productionAccess ? 'Production' : 'Sandbox', s.productionAccess ? 'var(--success)' : 'var(--warning)')
-    + row('Reputation', s.enforcementStatus, s.enforcementStatus === 'HEALTHY' ? 'var(--success)' : 'var(--danger)')
+    + row('Reputation', statusWord(s.enforcementStatus), s.enforcementStatus === 'HEALTHY' ? 'var(--success)' : 'var(--danger)')
     + row('Sending', s.sendingEnabled ? 'Enabled' : 'Paused', null)
     + row('Account limit', s.maxSendRate + '/sec', null)
     + row('We send at', s.configuredRate + '/sec', null)
@@ -238,9 +543,9 @@ function renderIdentity(identity) {
   let html =
       row('Domain', identity.domain, null)
     + row('Verified', identity.verified ? 'Yes' : 'No', identity.verified ? 'var(--success)' : 'var(--danger)')
-    + row('DKIM', identity.dkimStatus, identity.dkimStatus === 'SUCCESS' ? 'var(--success)' : 'var(--warning)')
+    + row('DKIM', statusWord(identity.dkimStatus), identity.dkimStatus === 'SUCCESS' ? 'var(--success)' : 'var(--warning)')
     + row('Custom MAIL FROM', identity.mailFromDomain || 'not set', null)
-    + row('MAIL FROM status', identity.mailFromStatus || 'n/a',
+    + row('MAIL FROM status', statusWord(identity.mailFromStatus) || 'n/a',
           mailFromLive ? 'var(--success)' : 'var(--warning)');
 
   if (!mailFromLive && identity.mailFromDomain) {
@@ -264,10 +569,15 @@ function row(label, value, color) {
 let campaignCache = [];
 
 async function loadCampaigns() {
+  showSkeleton('campaignBody', 9);
   try { campaignCache = await api('/api/campaigns'); }
-  catch (e) { toast('Could not load campaigns', 'err'); return; }
+  catch (e) {
+    $('campaignBody').innerHTML = errorRow(9, e.message || 'Could not load campaigns.', 'loadCampaigns()');
+    toast('Could not load campaigns', 'err');
+    return;
+  }
 
-  $('badgeCampaigns').textContent = campaignCache.length;
+  setNavBadge('badgeCampaigns', campaignCache.length);
   $('campaignBody').innerHTML = campaignCache.length ? campaignCache.map(c =>
     '<tr class="clickable" onclick="openCampaign(' + c.id + ')">'
     + '<td><strong>' + esc(c.name) + '</strong><br><span style="font-size:12px;color:var(--text-mute)">'
@@ -278,9 +588,10 @@ async function loadCampaigns() {
     + '<td class="num">' + num(c.sent) + '</td>'
     + '<td class="num">' + num(c.opened) + ' <span style="color:var(--text-mute)">(' + c.openRate + '%)</span></td>'
     + '<td class="num">' + num(c.clicked) + ' <span style="color:var(--text-mute)">(' + c.clickRate + '%)</span></td>'
-    + '<td class="num" style="color:' + (c.failed > 0 ? 'var(--danger)' : 'inherit') + '">' + num(c.failed) + '</td>'
+    + '<td class="num" style="color:' + (c.failed > 0 ? 'var(--danger-fg)' : 'inherit') + '">' + num(c.failed) + '</td>'
     + '<td><button class="btn btn-sm">Open</button></td></tr>').join('')
-    : emptyRow(9, 'No campaigns yet.');
+    : emptyState(9, 'i-campaign', 'No campaigns yet. A campaign is one message to one list.',
+        can('CAMPAIGNS_WRITE') ? actionBtn('New campaign', 'openCampaignKind()', true) : '');
 }
 
 /* =========================================================================
@@ -308,8 +619,9 @@ function newCampaign() {
   $('composerStatus').className = 'pill pill-draft plain';
   $('audienceCount').textContent = 'no list';
   $('audienceNote').textContent = '';
-  $('linkBody').innerHTML = emptyRow(3, 'No clicks recorded yet.');
-  $('recipientBody').innerHTML = emptyRow(6, 'Nobody queued yet.');
+  $('linkBody').innerHTML = emptyState(3, 'i-analytics', 'No clicks recorded yet.', '');
+  $('recipientBody').innerHTML = emptyState(6, 'i-users',
+    'Nobody is queued yet. Choose an audience in step 3, then save the campaign.', '');
   $('progressCard').style.display = 'none';
   $('wireOutput').textContent = 'Save the campaign to see this.';
   updatePreview();
@@ -346,7 +658,7 @@ async function openCampaign(id) {
   $('linkBody').innerHTML = (d.links && d.links.length) ? d.links.map(l =>
     '<tr><td><span class="truncate mono" title="' + attr(l.url) + '">' + esc(l.url) + '</span></td>'
     + '<td class="num">' + num(l.unique) + '</td><td class="num">' + num(l.clicks) + '</td></tr>').join('')
-    : emptyRow(3, 'No clicks recorded yet.');
+    : emptyState(3, 'i-analytics', 'No clicks recorded yet.', '');
 
   const editable = d.editable;
   composerEditable = editable;
@@ -546,7 +858,7 @@ function showComposerLock(status) {
     bar = document.createElement('div');
     bar.id = 'composerLock';
     bar.style.cssText = 'margin:0 0 14px;padding:11px 15px;border-radius:6px;font-size:13.5px;'
-      + 'background:rgba(234,179,8,.12);border:1px solid rgba(234,179,8,.45);color:#eab308;'
+      + 'background:rgba(217,158,11,.12);border:1px solid rgba(217,158,11,.45);color:var(--warning-fg);'
       + 'display:flex;gap:10px;align-items:center;flex-wrap:wrap';
     const host = $('view-composer');
     host.insertBefore(bar, host.firstChild.nextSibling || host.firstChild);
@@ -1064,9 +1376,15 @@ async function loadRecipients() {
   const params = new URLSearchParams({
     status: $('rStatus').value, q: $('rSearch').value.trim(), page: recipientPage, size: 50
   });
+  showSkeleton('recipientBody', 6);
   let d;
-  try { d = await api('/api/campaigns/' + currentCampaignId + '/recipients?' + params); } catch (e) { return; }
+  try { d = await api('/api/campaigns/' + currentCampaignId + '/recipients?' + params); }
+  catch (e) {
+    $('recipientBody').innerHTML = errorRow(6, e.message || 'Could not load the recipients.', 'loadRecipients()');
+    return;
+  }
 
+  const recipientFilters = ['rSearch', 'rStatus'];
   $('recipientBody').innerHTML = d.rows.length ? d.rows.map(r =>
     '<tr><td class="mono">' + esc(r.email) + '</td><td>' + esc(r.name) + '</td>'
     + '<td>' + statusPill(r.status)
@@ -1074,7 +1392,9 @@ async function loadRecipients() {
         + attr(r.failReason) + '">' + esc(r.failReason) + '</span>' : '') + '</td>'
     + '<td class="num">' + num(r.openCount) + '</td><td class="num">' + num(r.clickCount) + '</td>'
     + '<td class="mono">' + esc(r.sentAt || '-') + '</td></tr>').join('')
-    : emptyRow(6, 'Nobody matches those filters.');
+    : emptyState(6, 'i-users',
+        filtersSet(recipientFilters) ? 'Nobody matches those filters.' : 'Nobody is queued yet.',
+        filtersSet(recipientFilters) ? actionBtn('Clear filters', 'resetRecipientFilters()') : '');
 
   recipientPage = d.page;
   $('rCount').textContent = pagerText(d);
@@ -1089,10 +1409,15 @@ function pageRecipients(delta) {
    Lists
    ========================================================================= */
 async function loadLists() {
+  showSkeleton('listBody', 6);
   try { listCache = await api('/api/lists'); }
-  catch (e) { return; }
+  catch (e) {
+    const failed = $('listBody');
+    if (failed) failed.innerHTML = errorRow(6, e.message || 'Could not load the lists.', 'loadLists()');
+    return;
+  }
 
-  $('badgeLists').textContent = listCache.length;
+  setNavBadge('badgeLists', listCache.length);
   const body = $('listBody');
   if (body) {
     body.innerHTML = listCache.length ? listCache.map(l =>
@@ -1107,7 +1432,8 @@ async function loadLists() {
         + (can('SUBSCRIBERS_READ') ? '<button class="btn btn-sm" onclick="viewListMembers(' + l.id + ')">View</button>' : '')
         + (can('LISTS_WRITE') ? '<button class="btn btn-sm btn-danger" onclick="deleteList(' + l.id + ",'" + attr(l.name) + '\')">Delete</button>' : '')
       + '</td></tr>').join('')
-      : emptyRow(6, 'No lists yet. Create one, then import a CSV into it.');
+      : emptyState(6, 'i-list', 'No lists yet. A list is a reusable audience you can send to.',
+          can('LISTS_WRITE') ? actionBtn('New list', "openModal('modalList')", true) : '');
   }
   return listCache;
 }
@@ -1207,10 +1533,16 @@ async function loadSubscribers() {
   });
   if ($('sList').value) params.append('listId', $('sList').value);
 
+  showSkeleton('subscriberBody', 8);
   let d;
   try { d = await api('/api/subscribers?' + params); }
-  catch (e) { toast('Could not load subscribers', 'err'); return; }
+  catch (e) {
+    $('subscriberBody').innerHTML = errorRow(8, e.message || 'Could not load subscribers.', 'loadSubscribers()');
+    toast('Could not load subscribers', 'err');
+    return;
+  }
 
+  const subscriberFilters = ['sSearch', 'sList', 'sStatus'];
   $('subscriberBody').innerHTML = d.rows.length ? d.rows.map(s =>
     '<tr><td><strong>' + esc(s.name) + '</strong></td><td class="mono">' + esc(s.email) + '</td>'
     + '<td>' + esc(s.company || '-') + '</td><td>' + statusPill(s.status) + '</td>'
@@ -1219,7 +1551,11 @@ async function loadSubscribers() {
     + '<td class="actions">' + (can('SUBSCRIBERS_WRITE')
         ? '<button class="btn btn-sm btn-danger" onclick="deleteSubscriber(' + s.id + ",'" + attr(s.email) + '\')">Delete</button>' : '')
     + '</td></tr>').join('')
-    : emptyRow(8, 'Nobody matches those filters.');
+    : emptyState(8, 'i-users',
+        filtersSet(subscriberFilters) ? 'Nobody matches those filters.'
+          : 'Nobody here yet. Import a CSV into a list, or add one person by hand.',
+        filtersSet(subscriberFilters) ? actionBtn('Clear filters', 'resetSubscriberFilters()')
+          : (can('SUBSCRIBERS_WRITE') ? actionBtn('Add subscriber', "openModal('modalSubscriber')", true) : ''));
 
   subscriberPage = d.page;
   $('sCount').textContent = pagerText(d);
@@ -1263,17 +1599,26 @@ let suppressionPage = 0;
 async function loadSuppressions() {
   const params = new URLSearchParams({
     q: $('supSearch').value.trim(), reason: $('supReason').value, page: suppressionPage, size: 50 });
+  showSkeleton('supBody', 4);
   let d;
   try { d = await api('/api/suppressions?' + params); }
-  catch (e) { toast('Could not load the list', 'err'); return; }
+  catch (e) {
+    $('supBody').innerHTML = errorRow(4, e.message || 'Could not load the suppression list.', 'loadSuppressions()');
+    toast('Could not load the list', 'err');
+    return;
+  }
 
+  const supFilters = ['supSearch', 'supReason'];
   $('supBody').innerHTML = d.rows.length ? d.rows.map(s =>
     '<tr><td class="mono">' + esc(s.email) + '</td><td>' + statusPill(s.reason) + '</td>'
     + '<td class="mono">' + esc(s.at) + '</td>'
     + '<td>' + (can('SUPPRESSION_WRITE')
         ? '<button class="btn btn-sm btn-danger" onclick="removeSuppression(\'' + attr(s.email) + '\')">Allow again</button>' : '')
     + '</td></tr>').join('')
-    : emptyRow(4, 'Nobody is suppressed. That is a good sign.');
+    : emptyState(4, 'i-block',
+        filtersSet(supFilters) ? 'Nobody matches those filters.'
+          : 'Nobody is suppressed. That is a good sign.',
+        filtersSet(supFilters) ? actionBtn('Clear filters', 'resetSuppressionFilters()') : '');
 
   suppressionPage = d.page;
   $('supCount').textContent = pagerText(d);
@@ -1303,8 +1648,13 @@ async function removeSuppression(email) {
 let templateCache = [];
 
 async function loadTemplates() {
+  showSkeleton('templateBody', 6);
   try { templateCache = await api('/api/templates?type=' + encodeURIComponent($('tType').value)); }
-  catch (e) { toast('Could not load templates', 'err'); return; }
+  catch (e) {
+    $('templateBody').innerHTML = errorRow(6, e.message || 'Could not load templates.', 'loadTemplates()');
+    toast('Could not load templates', 'err');
+    return;
+  }
 
   $('templateBody').innerHTML = templateCache.length ? templateCache.map(t =>
     '<tr><td><strong>' + esc(t.name) + '</strong>'
@@ -1318,7 +1668,11 @@ async function loadTemplates() {
         ? '<button class="btn btn-sm" onclick="openTemplateEditor(' + t.id + ')">Edit</button>'
           + '<button class="btn btn-sm btn-danger" onclick="deleteTemplate(' + t.id + ')">Delete</button>' : '')
     + '</td></tr>').join('')
-    : emptyRow(6, 'No templates yet.');
+    : emptyState(6, 'i-template',
+        filtersSet(['tType']) ? 'No templates of that type yet.'
+          : 'No templates yet. Save a creative once and every campaign can reuse it.',
+        filtersSet(['tType']) ? actionBtn('Show every type', 'resetTemplateFilter()')
+          : (can('TEMPLATES_WRITE') ? actionBtn('New template', 'openTemplateEditor(null)', true) : ''));
   return templateCache;
 }
 
@@ -1394,9 +1748,15 @@ let txTemplates = [];
 async function loadTransactional() {
   const params = new URLSearchParams({
     q: $('txSearch').value.trim(), status: $('txStatus').value, page: transactionalPage, size: 50 });
+  showSkeleton('txBody', 5);
   let d;
-  try { d = await api('/api/transactional/log?' + params); } catch (e) { return; }
+  try { d = await api('/api/transactional/log?' + params); }
+  catch (e) {
+    $('txBody').innerHTML = errorRow(5, e.message || 'Could not load the delivery log.', 'loadTransactional()');
+    return;
+  }
 
+  const txFilters = ['txSearch', 'txStatus'];
   $('txBody').innerHTML = d.rows.length ? d.rows.map(t =>
     '<tr><td class="mono">' + esc(t.to) + '</td><td class="mono">' + esc(t.template) + '</td>'
     + '<td>' + statusPill(t.status)
@@ -1404,7 +1764,11 @@ async function loadTransactional() {
         + attr(t.error) + '">' + esc(t.error) + '</span>' : '') + '</td>'
     + '<td class="truncate" style="max-width:150px">' + esc(t.sentVia) + '</td>'
     + '<td class="mono">' + esc(t.at) + '</td></tr>').join('')
-    : emptyRow(5, 'Nothing sent through the transactional API yet.');
+    : emptyState(5, 'i-send',
+        filtersSet(txFilters) ? 'Nothing matches those filters.'
+          : 'Nothing sent through the transactional API yet.',
+        filtersSet(txFilters) ? actionBtn('Clear filters', 'resetTransactionalFilters()')
+          : (can('TRANSACTIONAL_SEND') ? actionBtn('Send one now', "focusField('txTemplate')", true) : ''));
 
   transactionalPage = d.page;
   $('txCount').textContent = pagerText(d);
@@ -1452,8 +1816,19 @@ async function sendTransactional() {
    Team
    ========================================================================= */
 async function loadTeam() {
+  showSkeleton('teamBody', 5, 4);
   let team;
-  try { team = await api('/api/admin/users'); } catch (e) { return; }
+  try { team = await api('/api/admin/users'); }
+  catch (e) {
+    $('teamBody').innerHTML = errorRow(5, e.message || 'Could not load the team.', 'loadTeam()');
+    return;
+  }
+
+  if (!team.length) {
+    $('teamBody').innerHTML = emptyState(5, 'i-users', 'Nobody can sign in to this console yet.',
+      can('TEAM_WRITE') ? actionBtn('Add member', "openModal('modalInvite')", true) : '');
+    return;
+  }
 
   $('teamBody').innerHTML = team.map(u =>
     '<tr><td><strong>' + esc(u.fullName) + '</strong><br><span class="mono" style="font-size:12px;color:var(--text-mute)">'
@@ -1477,7 +1852,17 @@ async function loadTeam() {
 
 let ROLES = [];
 async function loadRoles() {
-  try { ROLES = await api('/api/admin/roles'); } catch (e) { return; }
+  showSkeleton('roleBody', 3, 4);
+  try { ROLES = await api('/api/admin/roles'); }
+  catch (e) {
+    $('roleBody').innerHTML = errorRow(3, e.message || 'Could not load the roles.', 'loadRoles()');
+    return;
+  }
+
+  if (!ROLES.length) {
+    $('roleBody').innerHTML = emptyState(3, 'i-shield', 'The server returned no roles.', '');
+    return;
+  }
 
   $('roleBody').innerHTML = ROLES.map(r =>
     '<tr><td><strong>' + esc(r.label) + '</strong></td><td>' + esc(r.description) + '</td>'
@@ -1524,8 +1909,13 @@ async function resetPassword(id, email) {
    API keys
    ========================================================================= */
 async function loadKeys() {
+  showSkeleton('keyBody', 6, 4);
   let keys;
-  try { keys = await api('/api/admin/api-keys'); } catch (e) { return; }
+  try { keys = await api('/api/admin/api-keys'); }
+  catch (e) {
+    $('keyBody').innerHTML = errorRow(6, e.message || 'Could not load the API keys.', 'loadKeys()');
+    return;
+  }
 
   $('keyBody').innerHTML = keys.length ? keys.map(k =>
     '<tr><td><strong>' + esc(k.name) + '</strong></td><td class="mono">' + esc(k.prefix) + '</td>'
@@ -1533,7 +1923,8 @@ async function loadKeys() {
     + '<td class="num">' + num(k.useCount) + '</td>'
     + '<td>' + (k.revoked ? '<span class="pill pill-failed">REVOKED</span>'
         : '<button class="btn btn-sm btn-danger" onclick="revokeKey(' + k.id + ')">Revoke</button>') + '</td></tr>').join('')
-    : emptyRow(6, 'No API keys yet. Create one for the HR system.');
+    : emptyState(6, 'i-key', 'No API keys yet. Create one for the system that sends through the API.',
+        actionBtn('Create key', "openModal('modalKey')", true));
 }
 
 async function createKey() {
@@ -1588,14 +1979,21 @@ let auditPage = 0;
 
 async function loadAudit() {
   const params = new URLSearchParams({ q: $('aSearch').value.trim(), page: auditPage, size: 50 });
+  showSkeleton('auditBody', 6);
   let d;
-  try { d = await api('/api/admin/audit?' + params); } catch (e) { return; }
+  try { d = await api('/api/admin/audit?' + params); }
+  catch (e) {
+    $('auditBody').innerHTML = errorRow(6, e.message || 'Could not load the audit log.', 'loadAudit()');
+    return;
+  }
 
   $('auditBody').innerHTML = d.rows.length ? d.rows.map(a =>
     '<tr><td class="mono nowrap">' + esc(a.at) + '</td><td><strong>' + esc(a.actor) + '</strong></td>'
     + '<td>' + esc(a.action) + '</td><td class="truncate">' + esc(a.target) + '</td>'
     + '<td class="truncate">' + esc(a.detail) + '</td><td class="mono">' + esc(a.ip) + '</td></tr>').join('')
-    : emptyRow(6, 'Nothing recorded yet.');
+    : emptyState(6, 'i-audit',
+        filtersSet(['aSearch']) ? 'Nothing matches that search.' : 'Nothing recorded yet.',
+        filtersSet(['aSearch']) ? actionBtn('Clear the search', 'resetAuditFilter()') : '');
 
   auditPage = d.page;
   $('aCount').textContent = pagerText(d);
@@ -1634,7 +2032,7 @@ async function loadVerifySummary() {
   const tiles = [
     { label: 'In this audience', value: num(d.audience), foot: num(d.unchecked) + ' never checked', cls: '' },
     { label: 'Checked', value: num(d.checked), foot: 'kept ' + num(d.settings ? d.settings.retentionDays : 0) + ' days', cls: '' },
-    { label: 'Deliverable', value: num(d.deliverable), foot: d.deliverablePercent + '% safe to send', cls: 'good' },
+    { label: 'Deliverable', value: num(d.deliverable), foot: d.deliverablePercent + '% safe to send', cls: '' },
     { label: 'Risky', value: num(d.risky), foot: 'role accounts, catch-all', cls: 'warn' },
     { label: 'Undeliverable', value: num(d.undeliverable), foot: 'would hard bounce', cls: 'danger' }
   ];
@@ -1648,17 +2046,27 @@ async function loadVerifyResults() {
     verdict: $('verifyVerdict').value,
     page: verifyPage, size: 50
   });
+  showSkeleton('verifyBody', 7);
   let d;
   try { d = await api('/api/verification/results?' + params); }
-  catch (e) { toast('Could not load results', 'err'); return; }
+  catch (e) {
+    $('verifyBody').innerHTML = errorRow(7, e.message || 'Could not load the results.', 'loadVerifyResults()');
+    toast('Could not load results', 'err');
+    return;
+  }
 
+  const verifyFilters = ['verifySearch', 'verifyVerdict'];
   $('verifyBody').innerHTML = d.rows.length ? d.rows.map(r =>
     '<tr><td class="mono">' + esc(r.email) + '</td>'
     + '<td>' + verdictPill(r.verdict, r.label) + '</td>'
     + '<td class="truncate">' + esc(r.reason) + '</td>'
     + '<td>' + mark(r.syntax) + '</td><td>' + mark(r.mx) + '</td><td>' + mark(r.mailbox) + '</td>'
     + '<td class="mono nowrap">' + esc(r.checkedAt) + '</td></tr>').join('')
-    : emptyRow(7, 'Nothing verified yet. Pick a list and run a check.');
+    : emptyState(7, 'i-verify',
+        filtersSet(verifyFilters) ? 'Nothing matches those filters.'
+          : 'Nothing verified yet. Pick a list above and run a check.',
+        filtersSet(verifyFilters) ? actionBtn('Clear filters', 'resetVerifyFilters()')
+          : (can('VERIFICATION_RUN') ? actionBtn('Verify this list', 'startListVerification()', true) : ''));
 
   verifyPage = d.page;
   $('verifyCount').textContent = num(d.total) + ' total, page ' + (d.page + 1)
@@ -1676,11 +2084,24 @@ function verdictPill(verdict, label) {
   return '<span class="pill ' + (map[verdict] || 'pill-draft') + '">' + esc(label || verdict) + '</span>';
 }
 
-/** The server sends "ok", "no" or "" so every check column renders the same three ways. */
+/** The server sends "ok", "no" or "" so every check column renders the same three
+    ways. These are sprite symbols rather than the tick and cross characters that
+    used to be here: those are font glyphs, so the device chooses how they look and
+    a machine with no such glyph paints an empty box in the one column whose entire
+    job is to say pass or fail. The label is on the svg because an icon with no
+    text has to name itself to a screen reader. */
 function mark(value) {
-  if (value === 'ok') return '<span style="color:var(--success)">&#10003;</span>';
-  if (value === 'no') return '<span style="color:var(--danger-fg)">&#10007;</span>';
-  return '<span style="color:var(--text-faint)">&ndash;</span>';
+  if (value === 'ok') {
+    return '<svg class="ic ic-sm" role="img" aria-label="yes" style="color:var(--success-fg)">'
+         + '<use href="#i-check"/></svg>';
+  }
+  if (value === 'no') {
+    return '<svg class="ic ic-sm" role="img" aria-label="no" style="color:var(--danger-fg)">'
+         + '<use href="#i-close"/></svg>';
+  }
+  // --text-faint is a graphic colour and measures 3.96:1 on --panel, under the
+  // 4.5:1 floor section 2 sets for body text, and this is body text.
+  return '<span style="color:var(--text-mute)" title="not checked">-</span>';
 }
 
 function kpiTile(t) {
@@ -1758,19 +2179,26 @@ async function loadAnalytics() {
   const params = new URLSearchParams({ days: $('anDays').value });
   if (picker.value) params.set('campaignId', picker.value);
 
+  showSkeleton('anLinks', 4, 5);
+  showSkeleton('anClients', 3, 5);
   let d;
   try { d = await api('/api/analytics/overview?' + params); }
-  catch (e) { toast('Could not load analytics', 'err'); return; }
+  catch (e) {
+    $('anLinks').innerHTML = errorRow(4, e.message || 'Could not load analytics.', 'loadAnalytics()');
+    $('anClients').innerHTML = errorRow(3, e.message || 'Could not load analytics.', 'loadAnalytics()');
+    toast('Could not load analytics', 'err');
+    return;
+  }
 
   const s = d.summary;
   $('anKpis').innerHTML = [
     { label: 'Delivered', value: num(s.delivered), foot: s.deliveredRate + '% of sent', cls: '' },
-    { label: 'Reliable opens', value: num(s.reliableOpens), foot: s.openRate + '% open rate', cls: 'accent' },
+    { label: 'Reliable opens', value: num(s.reliableOpens), foot: s.openRate + '% open rate', cls: '' },
     { label: 'Apple MPP opens', value: num(s.mppOpens), foot: 'excluded from the rate', cls: '' },
     { label: 'Bot opens', value: num(s.botOpens), foot: 'excluded from the rate', cls: '' },
-    { label: 'Clicks', value: num(s.reliableClicks), foot: s.clickRate + '% clicked, ' + s.clickToOpenRate + '% of openers', cls: 'accent' },
+    { label: 'Clicks', value: num(s.reliableClicks), foot: s.clickRate + '% clicked, ' + s.clickToOpenRate + '% of openers', cls: '' },
     { label: 'Bounced', value: num(s.bounced), foot: s.bounceRate + '% against a ' + s.bounceDangerLine + '% danger line',
-      cls: Number(s.bounceRate) >= Number(s.bounceDangerLine) ? 'danger' : 'good' },
+      cls: Number(s.bounceRate) >= Number(s.bounceDangerLine) ? 'danger' : '' },
     { label: 'Complaints', value: num(s.complained), foot: s.complaintRate + '% of delivered', cls: Number(s.complaintRate) > 0.1 ? 'warn' : '' },
     { label: 'Unsubscribed', value: num(s.unsubscribed), foot: s.unsubscribeRate + '% of delivered', cls: '' }
   ].map(kpiTile).join('');
@@ -1791,12 +2219,12 @@ async function loadAnalytics() {
     '<tr><td class="truncate"><a href="' + attr(l.url) + '" target="_blank" rel="noopener noreferrer">'
     + esc(l.url) + '</a></td><td>' + num(l.clicks) + '</td><td>' + num(l.unique) + '</td>'
     + '<td>' + esc(l.share) + '%</td></tr>').join('')
-    : emptyRow(4, 'No clicks recorded in this window.');
+    : emptyState(4, 'i-analytics', 'No clicks recorded in this window.', '');
 
   const clients = (d.clients && d.clients.clients) || [];
   $('anClients').innerHTML = clients.length ? clients.map(c =>
     '<tr><td>' + esc(c.name) + '</td><td>' + num(c.count) + '</td><td>' + esc(c.share) + '%</td></tr>').join('')
-    : emptyRow(3, 'No reliable opens to break down yet.');
+    : emptyState(3, 'i-analytics', 'No reliable opens to break down yet.', '');
 
   // The segments are per campaign by definition: "who opened and did nothing" has no
   // meaning across a whole account, because a person can be a non-opener of one
@@ -1829,7 +2257,7 @@ async function loadSegments(campaignId) {
   catch (e) { panel.style.display = 'none'; tto.style.display = 'none'; return; }
 
   const tile = s =>
-    '<div class="kpi ' + (s.unmailable ? 'danger' : s.segment === 'CLICKED' ? 'accent' : '')
+    '<div class="kpi ' + (s.unmailable ? 'danger' : '')
     + '" style="cursor:pointer" role="button" tabindex="0"'
     + ' onclick="openSegment(\'' + attr(s.segment) + '\')"'
     + ' onkeydown="if(event.key===\'Enter\')openSegment(\'' + attr(s.segment) + '\')"'
@@ -1877,11 +2305,11 @@ function drawTimeToOpen(buckets) {
     const x = 26 + i * 76;
     const h = Math.round(140 * b.count / max);
     parts.push('<rect x="' + x + '" y="' + (160 - h) + '" width="56" height="' + Math.max(h, 1)
-      + '" rx="3" fill="#1f9d55" fill-opacity="0.8"/>');
+      + '" rx="3" fill="' + CHART_INK.series1 + '" fill-opacity="0.8"/>');
     parts.push('<text x="' + (x + 28) + '" y="' + (154 - h) + '" text-anchor="middle"'
-      + ' class="chart-axis" fill="#eaeaea">' + num(b.count) + '</text>');
+      + ' class="chart-axis" fill="' + CHART_INK.label + '">' + num(b.count) + '</text>');
     parts.push('<text x="' + (x + 28) + '" y="180" text-anchor="middle" class="chart-axis-sm"'
-      + ' fill="#9a9a9a">' + esc(b.label) + '</text>');
+      + ' fill="' + CHART_INK.labelDim + '">' + esc(b.label) + '</text>');
   });
   svg.innerHTML = parts.join('');
 }
@@ -1901,9 +2329,14 @@ async function loadSegmentPeople() {
     q: $('segSearch').value.trim(), page: segmentPage
   });
 
+  showSkeleton('segBody', 6);
   let d;
   try { d = await api('/api/analytics/segment/people?' + params); }
-  catch (e) { toast(e.message, 'err'); return; }
+  catch (e) {
+    $('segBody').innerHTML = errorRow(6, e.message || 'Could not load these people.', 'loadSegmentPeople()');
+    toast(e.message, 'err');
+    return;
+  }
 
   $('segTitle').textContent = d.label;
   $('segDesc').textContent = d.description;
@@ -1914,7 +2347,9 @@ async function loadSegmentPeople() {
     + '<td class="num">' + num(r.opens) + '</td>'
     + '<td class="num">' + num(r.clicks) + '</td>'
     + '<td class="nowrap">' + esc(String(r.sentAt).replace('T', ' ').slice(0, 16)) + '</td></tr>').join('')
-    : emptyRow(6, 'Nobody is in this group.');
+    : emptyState(6, 'i-users',
+        filtersSet(['segSearch']) ? 'Nobody matches that search.' : 'Nobody is in this group.',
+        filtersSet(['segSearch']) ? actionBtn('Clear the search', 'resetSegmentFilter()') : '');
   $('segCount').textContent = pagerText(d);
 }
 
@@ -1971,13 +2406,13 @@ function drawSeries(series) {
   for (let g = 0; g <= 4; g++) {
     const gy = PAD_T + (H - PAD_T - PAD_B) * g / 4;
     out += '<line x1="' + PAD_L + '" y1="' + gy + '" x2="' + W + '" y2="' + gy
-      + '" stroke="rgba(255,255,255,.07)" stroke-width="1"/>'
+      + '" stroke="' + CHART_INK.grid + '" stroke-width="1"/>'
       + '<text x="' + (PAD_L - 8) + '" y="' + (gy + 4) + '" class="chart-axis" text-anchor="end">'
       + Math.round(peak * (4 - g) / 4) + '</text>';
   }
-  out += '<path d="' + area('sent') + '" fill="rgba(47,111,237,.14)"/>';
-  out += '<path d="' + path('sent') + '" fill="none" stroke="#2f6fed" stroke-width="2"/>';
-  out += '<path d="' + path('reliableOpens') + '" fill="none" stroke="#19a7a0" stroke-width="2"/>';
+  out += '<path d="' + area('sent') + '" fill="' + CHART_INK.series1Fill + '"/>';
+  out += '<path d="' + path('sent') + '" fill="none" stroke="' + CHART_INK.series1 + '" stroke-width="2"/>';
+  out += '<path d="' + path('reliableOpens') + '" fill="none" stroke="' + CHART_INK.series2 + '" stroke-width="2"/>';
 
   const labelEvery = Math.ceil(series.length / 8);
   series.forEach((p, i) => {
@@ -1986,6 +2421,7 @@ function drawSeries(series) {
       + esc(String(p.day).slice(5)) + '</text>';
   });
   svg.innerHTML = out;
+  dropCollidingAxisLabels(svg);
 }
 
 /* =========================================================================
@@ -2001,9 +2437,14 @@ async function loadMessageLog() {
     page: messageLogPage, size: 50
   });
 
+  showSkeleton('mlBody', 6);
   let d;
   try { d = await api('/api/messagelog?' + params); }
-  catch (e) { toast('Could not load the message log', 'err'); return; }
+  catch (e) {
+    $('mlBody').innerHTML = errorRow(6, e.message || 'Could not load the message log.', 'loadMessageLog()');
+    toast('Could not load the message log', 'err');
+    return;
+  }
 
   const outcomes = $('mlOutcome');
   if (!outcomes.dataset.filled && d.outcomes) {
@@ -2019,7 +2460,11 @@ async function loadMessageLog() {
     + '<td>' + statusPill(r.outcome) + '</td>'
     + '<td class="truncate">' + esc(r.serverResponse) + '</td>'
     + '<td><button class="btn btn-sm" onclick="openMessageDetail(' + r.id + ')">Detail</button></td></tr>').join('')
-    : emptyRow(6, 'Nothing logged yet. Rows appear as soon as a message is sent.');
+    : emptyState(6, 'i-log',
+        filtersSet(['mlSearch', 'mlOutcome', 'mlDirection']) ? 'Nothing matches those filters.'
+          : 'Nothing logged yet. A row appears here as soon as a message is sent.',
+        filtersSet(['mlSearch', 'mlOutcome', 'mlDirection'])
+          ? actionBtn('Clear filters', 'resetMessageLogFilters()') : '');
 
   messageLogPage = d.page;
   $('mlCount').textContent = pagerText(d) + ', kept ' + d.retentionDays + ' days';
@@ -2039,7 +2484,7 @@ async function loadMessageLogSummary() {
   const by = s.byOutcome || {};
   $('mlKpis').innerHTML = [
     { label: 'Last 24 hours', value: num(s.total), foot: 'messages logged', cls: '' },
-    { label: 'Delivered', value: num(by.DELIVERED || 0), foot: 'confirmed by the receiving server', cls: 'good' },
+    { label: 'Delivered', value: num(by.DELIVERED || 0), foot: 'confirmed by the receiving server', cls: '' },
     { label: 'Accepted by SES', value: num(by.SENT || 0), foot: 'not yet confirmed delivered', cls: '' },
     { label: 'Bounced', value: num(by.BOUNCED || 0), foot: num(by.COMPLAINED || 0) + ' complaints', cls: 'danger' },
     { label: 'Failed', value: num(by.FAILED || 0), foot: num(by.SUPPRESSED || 0) + ' refused before sending', cls: 'warn' }
@@ -2106,18 +2551,20 @@ async function loadMailboxes() {
   const body = $('mbBody');
   const notice = $('mbNotice');
   notice.innerHTML = '';
-  body.innerHTML = emptyRow(6, 'Loading...');
+  // Written straight rather than through showSkeleton: this screen is reloaded
+  // after every create, rename and delete, and the bars are the confirmation
+  // that the round trip is actually happening.
+  body.innerHTML = skeletonRows(6, 5);
 
   let data;
   try { data = await api('/api/admin/mailboxes'); }
-  catch (e) { body.innerHTML = emptyRow(6, e.message); return; }
+  catch (e) { body.innerHTML = errorRow(6, e.message, 'loadMailboxes()'); return; }
 
   MB.domain = data.domain || 'jarurat.care';
   MB.accounts = data.accounts || [];
   const suffix = $('mbDomainSuffix');
   if (suffix) suffix.textContent = '@' + MB.domain;
-  const badge = $('badgeMailboxes');
-  if (badge) badge.textContent = MB.accounts.length;
+  setNavBadge('badgeMailboxes', MB.accounts.length);
 
   // A missing admin token is a configuration state, not a failure. Say so plainly
   // instead of rendering an empty table that reads as "there are no mailboxes".
@@ -2125,11 +2572,17 @@ async function loadMailboxes() {
     notice.innerHTML = '<div class="alert warn" style="margin:0 0 16px">'
       + 'Mailbox administration is not configured. Set <span class="mono">STALWART_REFRESH_TOKEN</span> '
       + 'in the server environment and restart, then this screen can create and edit real mailboxes.</div>';
-    body.innerHTML = emptyRow(6, 'Not configured');
+    body.innerHTML = emptyState(6, 'i-server',
+      'Mailbox administration is not configured, so there is nothing to list.', '');
     return;
   }
 
-  if (!MB.accounts.length) { body.innerHTML = emptyRow(6, 'No mailboxes yet'); return; }
+  if (!MB.accounts.length) {
+    body.innerHTML = emptyState(6, 'i-mailboxes',
+      'No mailboxes yet. An address created here starts receiving mail within seconds.',
+      actionBtn('Create mailbox', 'openMailboxCreate()', true));
+    return;
+  }
 
   body.innerHTML = MB.accounts.map(function (a) {
     const aliases = a.aliases || [];
@@ -2137,7 +2590,7 @@ async function loadMailboxes() {
       ? '<span class="pill pill-info">' + aliases.length + '</span> '
         + '<span class="mono" style="color:var(--text-dim);font-size:12px">'
         + esc(aliases.slice(0, 2).join(', ')) + (aliases.length > 2 ? ', ...' : '') + '</span>'
-      : '<span style="color:var(--text-faint)">none</span>';
+      : '<span style="color:var(--text-mute)">none</span>';
     const quota = a.quotaBytes
       ? mbFmtBytes(a.usedBytes) + ' / ' + mbFmtBytes(a.quotaBytes)
       : mbFmtBytes(a.usedBytes);
@@ -2317,9 +2770,9 @@ function drawOverviewCharts(d) {
       const opened = Number(d.totalOpened || 0);
       const sent = Number(d.totalSent || 0);
       drawDonut(donut, [
-        { label: 'Clicked', value: clicked, color: '#2f6fed' },
-        { label: 'Opened, no click', value: Math.max(0, opened - clicked), color: '#19a7a0' },
-        { label: 'Not opened', value: Math.max(0, sent - opened), color: '#3a3a3a' }
+        { label: 'Clicked', value: clicked, color: CHART_INK.series1 },
+        { label: 'Opened, no click', value: Math.max(0, opened - clicked), color: CHART_INK.series2 },
+        { label: 'Not opened', value: Math.max(0, sent - opened), color: CHART_INK.rest }
       ], {
         centerValue: (d.openRate !== undefined ? d.openRate + '%' : ''),
         centerLabel: 'open rate',
@@ -2341,11 +2794,12 @@ function drawOverviewCharts(d) {
       range.textContent = String(a.summary.from).slice(0, 10) + ' to ' + String(a.summary.to).slice(0, 10);
     }
     drawArea(host, [
-      { label: 'Sent', color: '#2f6fed',
+      { label: 'Sent', color: CHART_INK.series1,
         points: series.map(p => ({ x: String(p.day).slice(5), y: p.sent })) },
-      { label: 'Reliable opens', color: '#19a7a0',
+      { label: 'Reliable opens', color: CHART_INK.series2,
         points: series.map(p => ({ x: String(p.day).slice(5), y: p.reliableOpens })) }
     ], { height: 240, empty: 'No sends in the last 14 days.' });
+    dropCollidingAxisLabels(host);
   }).catch(() => drawArea(host, [], { empty: 'Could not load the daily series.' }));
 }
 
@@ -2373,13 +2827,17 @@ function dnsPill(status) {
 
 async function loadDomains() {
   const host = $('domainsBody');
-  host.innerHTML = '<div class="panel"><div class="panel-body">'
-                 + '<div class="empty">Checking DNS...</div></div></div>';
+  // Four DNS lookups per domain run server side, so this wait is measured in
+  // seconds rather than milliseconds and is the one place skeleton rows earn
+  // their keep most.
+  host.innerHTML = '<div class="panel"><div class="panel-body tight"><div class="table-wrap">'
+                 + '<table class="data"><tbody>' + skeletonRows(3, 4) + '</tbody></table>'
+                 + '</div></div></div>';
 
   let d;
   try { d = await api('/api/admin/domains'); }
   catch (e) {
-    host.innerHTML = '<div class="alert err">' + esc(e.message) + '</div>';
+    host.innerHTML = errorPanel(e.message || 'Could not check the DNS records.', 'loadDomains()');
     return;
   }
 
@@ -2394,8 +2852,8 @@ async function loadDomains() {
     : '';
 
   if (!domains.length) {
-    host.innerHTML = '<div class="panel"><div class="panel-body">'
-                   + '<div class="empty">No sending domains configured.</div></div></div>';
+    host.innerHTML = emptyPanel('i-globe',
+      'No sending domains configured. A domain is added in Amazon SES and in DNS, not here.', '');
     return;
   }
 
@@ -2411,7 +2869,7 @@ async function loadDomains() {
       const found = (c.found || []);
       const value = found.length
         ? found.map(f => '<div class="mono dns-value">' + esc(f) + '</div>').join('')
-        : '<span style="color:var(--text-faint)">not found</span>';
+        : '<span style="color:var(--text-mute)">not found</span>';
       return '<tr>'
         + '<td style="white-space:nowrap"><strong>' + esc(label) + '</strong>'
         + '<div class="sub" style="margin:2px 0 0">' + esc(why) + '</div></td>'
@@ -2457,13 +2915,21 @@ function stampTableLabels(root) {
     : document.querySelectorAll('table.data');
 
   tables.forEach(table => {
+    // aria-busy is settled here for the same reason the labels are. There is no
+    // single place a loader finishes, but the observer sees every tbody the
+    // instant it changes, so one rule keeps the announcement honest for every
+    // table including any added later.
+    table.setAttribute('aria-busy', table.querySelector('tbody tr[data-skeleton]') ? 'true' : 'false');
+
     const heads = Array.prototype.map.call(
       table.querySelectorAll('thead th'), th => th.textContent.trim());
     if (!heads.length) return;
 
     table.querySelectorAll('tbody tr').forEach(tr => {
-      // The empty-state and loading rows are a single wide cell, not a record.
+      // The empty, error and loading rows are chrome rather than records, so
+      // they get no column headings stamped into them.
       if (tr.querySelector('td[colspan]')) return;
+      if (tr.hasAttribute('data-skeleton')) return;
 
       Array.prototype.forEach.call(tr.children, (td, i) => {
         const head = heads[i];

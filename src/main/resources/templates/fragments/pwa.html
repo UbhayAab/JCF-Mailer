@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<!--
+  The install-to-home-screen surface, shared by every page so the option is
+  offered on the login screen too, before anyone has an account.
+
+  The status bar style is deliberately "black" and not "black-translucent".
+  Translucent puts our own header underneath the clock and battery on a notched
+  iPhone, which then needs env(safe-area-inset-top) padding on each layout to
+  undo. Black asks iOS to reserve the strip instead. On a #191919 page the seam
+  is invisible, and no layout has to know about it.
+-->
+<!--
+  The fragment is a th:block, not the <head> element itself. th:replace swaps in
+  the whole host element, so hanging the fragment on <head> emits a second <head>
+  inside the page's own. Browsers recover from that, but it is invalid and it is
+  the kind of thing a manifest parser is entitled to trip over.
+-->
+<head>
+<th:block th:fragment="head">
+    <meta name="theme-color" content="#191919">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="Jarurat Mail">
+    <meta name="application-name" content="Jarurat Mail">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png">
+</th:block>
+</head>
+<body>
+<th:block th:fragment="script">
+    <script src="/js/pwa.js"></script>
+</th:block>
+</body>
+</html>

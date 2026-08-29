@@ -2,9 +2,13 @@
 <html lang="en" xmlns:th="http://www.thymeleaf.org" data-theme="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- viewport-fit=cover is what makes every env(safe-area-inset-*) live on iOS.
+         Without it the tab bar's own surface stops at the safe area edge and an
+         iPhone paints its own band of a different charcoal underneath it. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Jarurat Mail</title>
     <link rel="icon" href="/logo.png">
+    <th:block th:replace="~{fragments/pwa :: head}"></th:block>
     <style>
         /* ==================================================================
            Jarurat Mail - webmail surface.
@@ -18,6 +22,11 @@
            block. The console has one theme; a second one here was where a
            blue slate kept coming back whenever the operating system was set
            to light.
+
+           The layout is phone first. The message row, the header and the
+           bottom tab bar are written for 390px and then widened at 900px,
+           because the phone is the surface most people use and a desktop
+           override is easier to reason about than a phone override.
            ================================================================== */
         :root {
             color-scheme: dark;
@@ -60,10 +69,16 @@
             --radius:    8px;
             --radius-sm: 6px;
             --radius-xs: 4px;
+            --r-lg:      16px;
             --shadow:     0 1px 2px rgba(0,0,0,.30);
             --shadow-pop: 0 10px 32px rgba(0,0,0,.48);
             --mono: ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Consolas,monospace;
             --sans: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+
+            /* motion, one curve, three durations */
+            --t-fast: 120ms cubic-bezier(.2,.7,.3,1);
+            --t-base: 200ms cubic-bezier(.2,.7,.3,1);
+            --t-slow: 320ms cubic-bezier(.2,.7,.3,1);
         }
 
         *{box-sizing:border-box}
@@ -90,6 +105,18 @@
                                   border:2px solid transparent;background-clip:content-box}
         ::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.24);background-clip:content-box}
 
+        /* ============ icons ============
+           One shape system, shipped in fragments/icons.html. pointer-events:none
+           is not cosmetic: every delegated handler on this page reads
+           closest('[data-act]') from the event target, and without this rule the
+           target of a tap on a button is the <svg> or a node inside the <use>
+           shadow tree, which is not the button. */
+        .ic{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.75;
+            stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+        .ic-lg{width:20px;height:20px}
+        .ic-sm{width:15px;height:15px;stroke-width:1.9}
+        .ic-32{width:32px;height:32px;stroke-width:1.5;color:var(--text-faint)}
+
         /* ============ shell ============ */
         .app{display:grid;grid-template-columns:220px 1fr;height:100dvh;overflow:hidden}
         .rail{background:var(--sidebar-bg);border-right:1px solid var(--border);
@@ -106,14 +133,14 @@
              padding:7px 10px;border-radius:var(--radius-xs);color:var(--text-dim);cursor:pointer;
              text-align:left;font-size:13px;font-weight:500;line-height:18px;text-decoration:none;
              box-shadow:inset 0 0 0 0 transparent;
-             transition:background .12s,color .12s,box-shadow .12s;user-select:none}
+             transition:background var(--t-fast),color var(--t-fast),box-shadow var(--t-fast);user-select:none}
         .nav:hover{background:var(--panel-hover);color:var(--text);text-decoration:none}
         /* The current item is a lifted slab with a blue left edge, exactly as in
            the console. It used to be a solid saturated blue block, which is what
            made the whole mailbox read as a blue product. */
         .nav[aria-current="true"]{background:var(--panel-3);color:#fff;font-weight:600;
                                   box-shadow:inset 3px 0 0 var(--primary)}
-        .nav .ic{width:16px;text-align:center;opacity:.85;flex:none}
+        .nav .ic{width:16px;height:16px;opacity:.85;flex:none}
         .nav[aria-current="true"] .ic{opacity:1}
         .nav .badge{margin-left:auto;font-size:10.5px;font-weight:600;padding:0 5px;border-radius:3px;
                     background:rgba(255,255,255,.10);color:var(--text-dim);
@@ -123,18 +150,47 @@
                   border-radius:var(--radius-xs);background:var(--panel);border:1px solid var(--border);
                   font-size:12px;color:var(--text-dim);min-width:0}
         .railfoot span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .avatar{width:26px;height:26px;border-radius:50%;background:var(--panel-4);color:var(--text);
-                display:grid;place-items:center;font-size:11px;font-weight:700;flex:none}
+
+        /* ============ avatars ============
+           Eight grounds, chosen once and measured once: every one of them reads
+           between 5.76:1 and 5.82:1 against the white initial it carries and at
+           least 2.80:1 against --panel, and no hue falls between 195 and 250, so
+           a sender chip can never be mistaken for the accent or for the unread
+           dot. They are held at 34 percent saturation deliberately. The contrast
+           floor alone allows far louder colours, and ten saturated discs down
+           the left edge of a charcoal list is the template look this whole pass
+           is removing. The
+           slot is derived from the address in mail.js, never assigned, so the
+           same person is the same colour in every folder and after every reload. */
+        .avatar{width:26px;height:26px;border-radius:50%;background:var(--panel-4);color:#fff;
+                display:grid;place-items:center;font-size:11px;font-weight:700;flex:none;
+                text-transform:uppercase;line-height:1}
+        .av{background:var(--panel-4)}
+        .avatar[data-c="0"],.av[data-c="0"]{background:#9d4d58}
+        .avatar[data-c="1"],.av[data-c="1"]{background:#895b44}
+        .avatar[data-c="2"],.av[data-c="2"]{background:#78633b}
+        .avatar[data-c="3"],.av[data-c="3"]{background:#526e36}
+        .avatar[data-c="4"],.av[data-c="4"]{background:#387150}
+        .avatar[data-c="5"],.av[data-c="5"]{background:#376f68}
+        .avatar[data-c="6"],.av[data-c="6"]{background:#864fa1}
+        .avatar[data-c="7"],.av[data-c="7"]{background:#974a80}
+        .av-sm{width:30px;height:30px;font-size:12px}
+        .av-lg{width:44px;height:44px;font-size:17px}
 
         .main{display:flex;flex-direction:column;min-width:0;overflow:hidden}
         .topbar{background:var(--panel-2);border-bottom:1px solid var(--border);padding:10px 16px;
                 display:flex;align-items:center;gap:10px;flex-wrap:wrap;flex:none;min-height:52px}
         .topbar h1{font-size:18px;font-weight:600;margin:0;letter-spacing:-.01em;color:var(--text)}
         .spacer{margin-left:auto}
-        .search{flex:1;min-width:180px;max-width:420px;padding:6px 10px;min-height:32px;
+        .qslot{display:flex;align-items:center;min-width:0}
+        /* flex:none, or the compose header squeezes the send button four pixels
+           narrower than the word inside it. */
+        #sendHead,#sendFoot{flex:none}
+        #qDesk{flex:1;min-width:180px;max-width:420px}
+        .search{flex:1;width:100%;min-width:0;padding:6px 10px;min-height:32px;
                 background:var(--field-bg);border:1px solid var(--border-strong);
                 border-radius:var(--radius-xs);color:var(--text);font-size:13px;line-height:18px;outline:none;
-                transition:border-color .12s,box-shadow .12s,background .12s}
+                transition:border-color var(--t-fast),box-shadow var(--t-fast),background var(--t-fast)}
         .search::placeholder{color:var(--text-faint)}
         .search:focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(47,111,237,.25);
                       background:var(--field-bg-focus)}
@@ -144,7 +200,8 @@
              padding:6px 14px;min-height:32px;border-radius:var(--radius-xs);
              border:1px solid var(--border-strong);background:var(--panel-3);color:var(--text);
              font-family:inherit;font-size:13px;font-weight:500;line-height:18px;cursor:pointer;
-             white-space:nowrap;transition:background .12s,border-color .12s,opacity .12s}
+             white-space:nowrap;-webkit-tap-highlight-color:transparent;
+             transition:background var(--t-fast),border-color var(--t-fast),opacity var(--t-fast)}
         .btn:hover{background:var(--panel-4);border-color:rgba(255,255,255,.26)}
         .btn:active{background:#2c2c2c}
         .btn:disabled{opacity:.45;cursor:not-allowed}
@@ -152,13 +209,25 @@
         .btn.pri:hover{background:var(--primary-hover);border-color:var(--primary-hover);color:#fff}
         .btn.pri:active{background:#2861d6;border-color:#2861d6}
         .btn.sm{padding:2px 9px;min-height:26px;font-size:12px;border-radius:3px;line-height:18px}
-        /* .btn.sm is two classes and would otherwise win on specificity and put
-           padding-right back to 9px, which ran the label under the chevron. */
-        select.btn,select.btn.sm{appearance:none;padding-right:26px;
-            background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2 4.5L6 8.5L10 4.5' stroke='%239a9a9a' stroke-width='1.6' fill='none' stroke-linecap='round'/></svg>");
-            background-repeat:no-repeat;background-position:right 8px center}
-        .btn:focus-visible,.nav:focus-visible,.fold:focus-visible,.msg:focus-visible,
+        .btn:focus-visible,.nav:focus-visible,.fold:focus-visible,.msg:focus-visible,.tab:focus-visible,
+        .pib:focus-visible,.mrow:focus-visible,
         input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--primary);outline-offset:1px}
+
+        /* The plain icon button, the only control on this page that carries no
+           word. Every one of them has an aria-label, and below 900px every one
+           of them is 44 by 44 whatever its glyph measures. */
+        .pib{display:inline-grid;place-items:center;width:34px;height:34px;flex:none;
+             border-radius:var(--radius-sm);border:1px solid transparent;background:none;
+             color:var(--text-dim);cursor:pointer;-webkit-tap-highlight-color:transparent;
+             transition:background var(--t-fast),color var(--t-fast)}
+        .pib:hover{background:var(--panel-3);color:var(--text)}
+        .pib:active{background:var(--panel-3)}
+        .pib[disabled]{opacity:.4;cursor:not-allowed}
+        .pib.on{color:var(--warning-fg)}
+        /* An async action shows its pending state on the control that was
+           pressed, and Refresh is a control with no room for a word. */
+        .pib.busy{pointer-events:none;opacity:.7}
+        .pib.busy .ic{animation:spin .8s linear infinite}
 
         .pill{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;
               letter-spacing:.05em;text-transform:uppercase;padding:1px 7px;border-radius:3px;
@@ -170,88 +239,238 @@
         /* .ac carries the sending address, not a status word, and an email
            address shouted in caps with letter spacing is harder to read. */
         .pill.ac{color:var(--primary-fg);background:rgba(47,111,237,.14);border-color:rgba(47,111,237,.34);
-                 text-transform:none;letter-spacing:0;font-size:11.5px}
+                 text-transform:none;letter-spacing:0;font-size:11.5px;max-width:46vw;min-width:0;
+                 overflow:hidden;text-overflow:ellipsis;display:inline-block;line-height:19px}
+        .pill.ac::before{display:none}
         .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
         .muted{color:var(--text-mute)}
 
-        /* ============ mail 3-pane ============ */
-        .mail{display:grid;grid-template-columns:186px 340px 1fr;flex:1;min-height:0}
-        .folders{border-right:1px solid var(--border);padding:10px 8px;overflow-y:auto;background:var(--panel-2)}
+        /* ============ phone header ============
+           A flow child of .main with flex:none, never absolute and never sticky.
+           An absolute header forces the list to carry a compensating padding-top
+           that has to change whenever search opens, and that pair drifts. Two
+           rows live here and exactly one is shown, switched by body.searching. */
+        .phead{display:none;flex:none;flex-direction:column;background:var(--panel-2);
+               border-bottom:1px solid var(--border);
+               padding-top:env(safe-area-inset-top,0px)}
+        .phead-row{display:none;align-items:center;gap:6px;height:56px;
+                   padding-left:max(8px,env(safe-area-inset-left,0px));
+                   padding-right:max(8px,env(safe-area-inset-right,0px))}
+        .phead-row[data-mode="title"]{display:flex}
+        body.searching .phead-row[data-mode="title"]{display:none}
+        body.searching .phead-row[data-mode="search"]{display:flex}
+        .ptitle{font-size:20px;font-weight:640;letter-spacing:-.02em;margin:0 4px;color:var(--text);
+                flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        #qPhone{flex:1}
+
+        /* ============ mail panes ============ */
+        .mail{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);flex:1;min-height:0}
+        /* The folder list is a block inside the rail, not a column of its own.
+           A column of its own put "Inbox" on screen twice with an identical
+           active state 186px apart, spent 406px of a 1440px window on
+           navigation for eight destinations, and left the rail 53 percent empty
+           below its last item while that column was 75 percent empty. These are
+           the same rows the phone folders sheet gets, unchanged. */
+        .folders{display:block;min-width:0}
         .fold{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:var(--radius-xs);
               cursor:pointer;font-size:13px;font-weight:500;line-height:18px;color:var(--text-dim);
               width:100%;background:none;border:1px solid transparent;text-align:left;
-              box-shadow:inset 0 0 0 0 transparent;transition:background .12s,color .12s,box-shadow .12s}
+              -webkit-tap-highlight-color:transparent;
+              box-shadow:inset 0 0 0 0 transparent;
+              transition:background var(--t-fast),color var(--t-fast),box-shadow var(--t-fast)}
         .fold:hover{background:var(--panel-hover);color:var(--text)}
+        .fold:active{background:var(--panel-3)}
         .fold.on{background:var(--panel-3);color:#fff;font-weight:600;box-shadow:inset 3px 0 0 var(--primary)}
+        /* In the rail a folder row and a nav row are the same object, so the
+           icon has to be the rail's 16px and not the sheet's 18px. Scoped to
+           .rail, because the phone sheet keeps the rows it already has. */
+        .rail .fold .ic{width:16px;height:16px;opacity:.85}
+        .rail .fold.on .ic{opacity:1}
         .fold .fname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .fold .ct{font-family:var(--mono);font-size:11px;color:var(--text-mute);font-variant-numeric:tabular-nums}
+        /* Two numerals that mean two different things, so they are two different
+           objects: unread is a filled chip, the same one the rail badge uses,
+           and the total is a plain mono numeral. What shipped was a single span
+           whose meaning flipped between unread and total with nothing to tell
+           you which but two greys at 11px. */
+        .fold .fu{font-size:10.5px;font-weight:600;padding:0 5px;border-radius:3px;flex:none;
+                  background:rgba(255,255,255,.10);color:var(--text-dim);
+                  font-variant-numeric:tabular-nums;line-height:16px}
+        .fold.on .fu{background:rgba(255,255,255,.18);color:#fff}
+        .fold .ct{font-family:var(--mono);font-size:11px;color:var(--text-faint);flex:none;
+                  font-variant-numeric:tabular-nums}
         .fold.on .ct{color:var(--text-dim)}
 
+        /* display:block, never flex. As a flex column with a definite height
+           every row became a flex item with flex-shrink:1, and the phone rule
+           that gave rows a min-height for tap targets also switched off the
+           automatic minimum size that was the only thing holding them open. A
+           folder of forty messages then painted every row at 44px while it held
+           75px of text, which is what put the hairline above each preview line
+           instead of below it. Block flow keeps .listfoot after the rows on its
+           own, which was the only thing the flex column was ever doing. */
         .list{border-right:1px solid var(--border);overflow-y:auto;background:var(--panel);
-              display:flex;flex-direction:column}
-        .msg{padding:11px 14px;border-bottom:1px solid var(--border-soft);cursor:pointer;text-align:left;
-             background:none;border-left:0;border-right:0;border-top:0;width:100%;display:block;
-             color:inherit;font:inherit;box-shadow:inset 0 0 0 0 transparent;
-             transition:background .12s,box-shadow .12s}
+              display:block;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+
+        /* The row, phone geometry: 16 + 18 + 18 + 16 + 8 = 76px exactly. */
+        .msg{display:grid;grid-template-columns:40px 1fr auto;column-gap:12px;align-items:start;
+             padding:16px 16px 8px;position:relative;width:100%;cursor:pointer;text-align:left;
+             background:none;border:0;color:inherit;font:inherit;
+             -webkit-tap-highlight-color:transparent;flex:none;
+             transition:background var(--t-fast),box-shadow var(--t-fast)}
         .msg:hover{background:rgba(255,255,255,.04)}
-        .msg.on{background:var(--panel-3);box-shadow:inset 3px 0 0 var(--primary)}
-        .msg .r1{display:flex;align-items:baseline;gap:8px}
-        /* Read and unread differ by weight and by the dot, not by colour alone. */
-        .msg .from{font-weight:500;font-size:13px;color:var(--text-dim);flex:1;
+        .msg:active{background:var(--panel-3)}
+        /* --panel-4 and not --panel-3. Against a --panel row ground, --panel-3 is
+           a six value lift, and the row the reader is showing came out dimmer
+           than every unread row around it: the open message must be the
+           brightest row in the list, because selection is something the user
+           just did and a data state must not outrank it. */
+        .msg.on{background:var(--panel-4);box-shadow:inset 3px 0 0 var(--primary)}
+        /* The hairline is inset to where the text starts. A full bleed rule under
+           a row that leads with a 40px avatar reads as the top edge of the row
+           below it, which is the misreading this whole pass is here to remove. */
+        .msg::after{content:"";position:absolute;left:68px;right:0;bottom:0;
+                    height:1px;background:var(--border)}
+        .msg:last-of-type::after{display:none}
+        /* No background here on purpose. .msg .av and .av[data-c] have the same
+           specificity, so a ground set on this rule would win on source order
+           and every sender chip would come out the same grey. */
+        .msg .av{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;
+                 color:#fff;font-size:15px;font-weight:650;
+                 position:relative;text-transform:uppercase;line-height:1}
+        /* The unread mark straddles the avatar's left rim. The 2px ring is the
+           row ground, so the dot punches out of the avatar rather than smudging it. */
+        .msg.unread .av::after{content:"";position:absolute;left:-4px;top:50%;
+             width:7px;height:7px;margin-top:-3.5px;border-radius:50%;
+             background:var(--primary);box-shadow:0 0 0 2px var(--panel)}
+        .msg .txt{min-width:0;display:block}
+        /* center and not baseline. Baseline alignment lines up a 14px name with
+           an 11.5px timestamp by their baselines, and the flex line then grows
+           to hold both half leadings, which made the row 77px and not 76. */
+        .msg .r1{display:flex;align-items:center;gap:8px;line-height:18px;height:18px}
+        .msg .from{font-size:14px;font-weight:450;color:var(--text-dim);flex:1;min-width:0;
                    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .msg.unread .from{font-weight:700;color:var(--text)}
-        .msg .when{font-family:var(--mono);font-size:10.5px;color:var(--text-mute);flex:none;
+        .msg.unread .from{font-weight:620;color:var(--text)}
+        .msg .when{font-size:11.5px;font-weight:500;color:var(--text-mute);flex:none;
                    font-variant-numeric:tabular-nums}
-        .msg .subj{font-size:12.5px;color:var(--text-dim);margin-top:2px;
+        .msg .subj{display:block;font-size:13.5px;line-height:18px;color:var(--text-dim);
                    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
         .msg.unread .subj{color:var(--text)}
-        .msg .prev{font-size:12px;color:var(--text-mute);margin-top:2px;
+        /* display:block and not the inline default: an inline span carries a
+           block strut that adds two pixels and the row measures 78 instead of 76. */
+        .msg .prev{display:block;font-size:12.5px;line-height:16px;color:var(--text-mute);
                    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .msg.unread .from::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
-                                  background:var(--primary);margin-right:6px;vertical-align:middle}
-        .msg .marks{float:right;color:var(--text-mute);font-size:11px}
-        .listfoot{padding:9px 14px;display:flex;align-items:center;gap:8px;
+        /* After .msg.unread and never before it. These two selectors have the
+           same specificity, so source order is the whole of the rule that the
+           row you are reading outranks the rows you have not opened. */
+        .msg.on .from{color:var(--text);font-weight:650}
+        .msg.on .subj{color:var(--text)}
+        .msg.on .prev{color:var(--text-dim)}
+        /* A grid cell of its own, never a float inside the subject. text-overflow
+           is computed ignoring floats, so a floated paperclip had the ellipsised
+           subject running underneath it. */
+        .msg .marks{display:flex;align-items:center;gap:4px;color:var(--text-mute);
+                    padding-top:2px;line-height:0}
+        .msg .marks .star{color:var(--warning-fg)}
+        .listfoot{padding:12px 16px;display:flex;align-items:center;gap:10px;
                   border-top:1px solid var(--border);background:var(--panel-2);
-                  font-size:12px;color:var(--text-mute);flex:none}
+                  font-size:12px;color:var(--text-mute)}
 
-        .reader{display:flex;flex-direction:column;background:var(--panel);min-width:0;overflow:hidden}
+        /* ============ skeleton ============
+           The same numbers as the real row, so nothing jumps when the data lands.
+           Bar widths rotate over three values in CSS rather than by Math.random,
+           so a re-render does not reshuffle them into a barcode. */
+        .skrow{display:grid;grid-template-columns:40px 1fr;column-gap:12px;min-height:76px;
+               padding:16px 16px 8px;position:relative}
+        .skrow::after{content:"";position:absolute;left:68px;right:0;bottom:0;height:1px;
+                      background:var(--border)}
+        .skb{display:flex;flex-direction:column;gap:6px;padding-top:2px;min-width:0}
+        .sk{display:block;border-radius:4px;
+            background:linear-gradient(90deg,var(--panel-3) 12%,var(--panel-4) 34%,var(--panel-3) 56%);
+            background-size:300% 100%;animation:sk 1.5s linear infinite}
+        .sk-av{width:40px;height:40px;border-radius:50%}
+        .sk-1{height:12px}
+        .sk-2{height:11px}
+        .sk-3{height:10px}
+        .skrow:nth-child(3n+1) .sk-1{width:42%}
+        .skrow:nth-child(3n+1) .sk-2{width:78%}
+        .skrow:nth-child(3n+1) .sk-3{width:60%}
+        .skrow:nth-child(3n+2) .sk-1{width:34%}
+        .skrow:nth-child(3n+2) .sk-2{width:64%}
+        .skrow:nth-child(3n+2) .sk-3{width:82%}
+        .skrow:nth-child(3n+3) .sk-1{width:50%}
+        .skrow:nth-child(3n+3) .sk-2{width:88%}
+        .skrow:nth-child(3n+3) .sk-3{width:47%}
+        /* background-position only. Animating width or height would relayout the
+           whole list sixty times a second on the slowest device we ship to. */
+        @keyframes sk{from{background-position:150% 50%}to{background-position:-50% 50%}}
+
+        /* ============ reader ============ */
+        .reader{display:flex;flex-direction:column;background:var(--panel);min-width:0;
+                overflow:hidden;position:relative}
+        .rbar{display:flex;align-items:center;gap:4px;flex:none;padding:8px 10px;
+              border-bottom:1px solid var(--border);background:var(--panel-2);min-height:52px}
+        .rbar-t{font-size:13px;font-weight:600;color:var(--text-dim);min-width:0;
+                overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 4px}
+        /* The sticky sender strip. It only has a job where the head scrolls out
+           of the pane and takes the sender with it, and that is the phone alone,
+           so at every other width it is not drawn. */
+        .rbar-who{display:none}
+        .rbar .pib[data-act="back"]{display:none}
+        .rbar .pib[data-act="more"]{display:none}
+        .rbody{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
         .rhead{padding:18px 22px 0;flex:none}
         .rhead h2{font-size:18px;margin:0 0 14px;font-weight:600;letter-spacing:-.01em;
-                  color:var(--text);word-wrap:break-word}
+                  color:var(--text);word-wrap:break-word;overflow-wrap:anywhere}
         .rmeta{display:flex;align-items:center;gap:10px;padding-bottom:13px;
                border-bottom:1px solid var(--border);flex-wrap:wrap}
         .rmeta .who{min-width:0}
         .rmeta .who b{display:block;font-weight:600;color:var(--text);
                       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-        .banner{background:rgba(217,158,11,.10);border:1px solid rgba(217,158,11,.32);
-                border-left:3px solid var(--warning);color:var(--warning-fg);
+        /* Section 2: an accent is an edge, one button or a focus ring, never a
+           large fill. This block used to apply the warning hue seven times over
+           - ground, hairline, a 3px bar, body copy, icon, button text and button
+           border - which made a note about images the loudest object on the
+           screen, louder than the sender and the subject it sat under. The hue
+           is now on the icon and nowhere else, and the button is an ordinary
+           secondary. */
+        .banner{background:var(--panel-2);border:1px solid var(--border-soft);color:var(--text-dim);
                 padding:9px 12px;border-radius:var(--radius-xs);font-size:12.5px;margin:14px 0 0;
                 display:flex;gap:9px;align-items:center;flex-wrap:wrap}
-        .banner .btn{background:transparent;border-color:rgba(217,158,11,.45);color:var(--warning-fg)}
-        .banner .btn:hover{background:rgba(217,158,11,.14);border-color:rgba(217,158,11,.65)}
+        .banner .bmsg{flex:1 1 200px;min-width:0}
+        .banner .ic{color:var(--warning-fg)}
         .atts{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
         .att{border:1px solid var(--border);border-radius:var(--radius-xs);padding:6px 10px;
              min-height:32px;display:inline-flex;align-items:center;gap:6px;font-size:12px;
-             color:var(--text-dim);background:var(--panel-3);text-decoration:none}
+             color:var(--text-dim);background:var(--panel-3);text-decoration:none;max-width:100%}
         .att:hover{background:var(--panel-4);border-color:var(--border-strong);
                    color:var(--text);text-decoration:none}
-        /* The reading frame fills what is left. It cannot report its own height,
-           because it runs with scripting switched off, so it scrolls internally. */
-        .rframe{flex:1;min-height:0;border:0;width:100%;margin-top:14px;background:var(--panel)}
-        /* Flex column, not grid. Under place-items:center the glyph and the
-           sentence after it became two separate grid rows, so on a tall pane the
-           icon sat a third of the way down and its caption sat two thirds down,
-           with several hundred pixels of nothing between them. */
-        .empty{display:flex;flex-direction:column;align-items:center;justify-content:center;
-               height:100%;color:var(--text-mute);text-align:center;padding:40px 20px;font-size:13px}
-        .empty .big{font-size:26px;display:block;margin-bottom:8px;opacity:.4;line-height:1}
-        /* A failure used to render as the same grey hollow circle as an empty
-           folder, so "the mail server is down" and "there is no mail" looked
-           identical. It now says which one it is, in words and in colour, and
-           offers the one action that helps. */
+        .att .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        /* The frame runs with scripting switched off and on an opaque origin, so
+           it can never report its own content height. iOS Safari then sizes it to
+           that content and ignores the CSS height, which stretches the pane
+           instead of scrolling inside it and takes the toolbar off the top of the
+           screen with nothing left to bring it back. The wrapper scrolls; the
+           frame keeps whatever height it wants. */
+        .rwrap{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;
+               -webkit-overflow-scrolling:touch}
+        .rframe{display:block;border:0;width:100%;height:100%;min-height:320px;background:var(--panel)}
+        .fab{display:none;place-items:center;width:52px;height:52px;border-radius:50%;
+             background:var(--primary);color:#fff;border:0;cursor:pointer;
+             box-shadow:0 6px 16px rgba(0,0,0,.45);-webkit-tap-highlight-color:transparent;
+             transition:background var(--t-fast),transform var(--t-fast)}
+        .fab:active{background:var(--primary-hover);transform:scale(.96)}
+        .fab-in-pane{position:absolute;right:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:5}
+
+        /* ============ states ============
+           Three of them, always all three. A failure used to render as the same
+           grey circle as an empty folder, so "the mail server is down" and "there
+           is no mail" looked identical. */
+        .empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
+               height:100%;color:var(--text-mute);text-align:center;padding:40px 24px;font-size:13px}
+        .empty .line{max-width:34ch;line-height:1.55}
         .errstate{display:flex;flex-direction:column;align-items:center;justify-content:center;
                   gap:9px;height:100%;padding:32px 20px;text-align:center}
-        .errstate .big{font-size:24px;line-height:1;color:var(--danger-fg)}
+        .errstate .ic-32{color:var(--danger-fg)}
         .errstate .head{font-size:13px;font-weight:600;color:var(--text)}
         .errstate .why{font-size:12.5px;color:var(--text-mute);max-width:34ch;line-height:1.55}
         .loadstate{display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -259,33 +478,160 @@
         .spin{width:18px;height:18px;border-radius:50%;border:2px solid var(--border-strong);
               border-top-color:var(--primary);animation:spin .7s linear infinite}
         @keyframes spin{to{transform:rotate(360deg)}}
-        @media(prefers-reduced-motion:reduce){.spin{animation:none}}
 
-        /* ============ compose ============ */
-        .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.62);display:none;place-items:center;
-                  z-index:150;padding:24px}
-        .backdrop.open{display:grid}
+        /* ============ sheets and compose ============ */
+        .backdrop{position:fixed;inset:0;background:rgba(0,0,0,.62);display:grid;place-items:center;
+                  z-index:150;padding:24px;opacity:0;visibility:hidden;pointer-events:none;
+                  transition:opacity var(--t-base),visibility 0s linear 200ms}
+        .backdrop.open{opacity:1;visibility:visible;pointer-events:auto;
+                       transition:opacity var(--t-base),visibility 0s}
         .sheet{background:var(--panel);border:1px solid var(--border-strong);border-radius:var(--radius);
                box-shadow:var(--shadow-pop);width:min(680px,100%);max-height:88vh;
                display:flex;flex-direction:column;overflow:hidden;
-               animation:fade-up .16s cubic-bezier(.2,.7,.3,1)}
-        @keyframes fade-up{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+               transform:translateY(8px);transition:transform var(--t-base)}
+        .backdrop.open .sheet{transform:translateY(0)}
         .sheet-h{padding:13px 18px;border-bottom:1px solid var(--border);background:var(--panel-2);
-                 display:flex;align-items:center;gap:12px}
-        .sheet-h h3{margin:0;font-size:15px;font-weight:600}
-        .sheet-b{padding:18px;overflow-y:auto}
+                 display:flex;align-items:center;gap:12px;flex:none}
+        .sheet-h h3{margin:0;font-size:15px;font-weight:600;white-space:nowrap}
+        /* On a phone the sending address is a caption of the compose title, not
+           a control: same node, same listeners, stripped of the pill so it stops
+           advertising itself as the thing to press. The slot is empty above
+           900px, where the address sits in the header as a pill and there is
+           room for it. */
+        .ctitle{display:flex;flex-direction:column;min-width:0}
+        #fromPhone{display:none;min-width:0}
+        #fromPhone .pill.ac{display:block;background:none;border:0;padding:0;max-width:100%;
+                            color:var(--text-mute);font-size:12px;font-weight:400;
+                            letter-spacing:0;line-height:15px}
+        /* flex:1, or a sheet with a definite height leaves its own footer
+           floating in the middle of the screen with dead panel below it. */
+        .sheet-b{padding:18px;overflow-y:auto;overscroll-behavior:contain;flex:1 1 auto;min-height:0}
         .sheet-f{padding:12px 18px;border-top:1px solid var(--border);background:var(--panel-2);
-                 display:flex;gap:8px;align-items:center}
+                 display:flex;gap:8px;align-items:center;flex:none;flex-wrap:wrap}
+        .grab{display:none;width:38px;height:4px;border-radius:2px;background:var(--panel-4);
+              margin:8px auto 0;flex:none}
+        .sheet-h .who{min-width:0}
+        .sheet-h .who b{display:block;font-size:14px;font-weight:600;color:var(--text)}
+        .sheet-h .who .muted{display:block;font-size:12px;overflow:hidden;
+                             text-overflow:ellipsis;white-space:nowrap}
+        .sheet-menu{padding:8px 8px 12px}
+        .mrow{display:flex;align-items:center;gap:12px;width:100%;min-height:52px;padding:0 12px;
+              border-radius:var(--radius-sm);border:1px solid transparent;background:none;
+              color:var(--text-dim);font-size:14px;font-weight:500;text-align:left;cursor:pointer;
+              text-decoration:none;-webkit-tap-highlight-color:transparent;
+              transition:background var(--t-fast),color var(--t-fast)}
+        .mrow:hover{background:var(--panel-3);color:var(--text);text-decoration:none}
+        .mrow:active{background:var(--panel-3)}
+        .mrow span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .mrow .chev{color:var(--text-faint);flex:none}
+        /* --danger-fg and never --danger: the solid red fails as text at this size. */
+        .mrow.danger,.mrow.danger:hover{color:var(--danger-fg)}
+        .mrow[disabled]{opacity:.4;cursor:not-allowed}
+        .mrow[disabled]:hover{background:none;color:var(--text-dim)}
         .field{margin-bottom:12px}
         .field label{display:block;font-size:11.5px;font-weight:600;margin-bottom:5px;color:var(--text-dim)}
         .field input,.field textarea{width:100%;padding:6px 10px;min-height:32px;
                 background:var(--field-bg);border:1px solid var(--border-strong);
                 border-radius:var(--radius-xs);color:var(--text);font-size:13px;line-height:18px;
-                outline:none;transition:border-color .12s,box-shadow .12s,background .12s}
+                outline:none;transition:border-color var(--t-fast),box-shadow var(--t-fast),background var(--t-fast)}
         .field input::placeholder,.field textarea::placeholder{color:var(--text-faint)}
         .field input:focus,.field textarea:focus{border-color:var(--primary);
                 box-shadow:0 0 0 2px rgba(47,111,237,.25);background:var(--field-bg-focus)}
         .field textarea{resize:vertical;font-family:var(--sans);min-height:120px;padding:8px 10px}
+        .hint{font-size:12px;color:var(--text-mute)}
+        /* A rule and not an inline style: the phone layout centres this block
+           with auto margins, and an inline margin-top:0 outranks any of them. */
+        #unlockWhy{margin:0 0 14px;line-height:1.55}
+
+        /* ============ attachments on the compose sheet ============
+           The list is the control. A count in a label would leave the sender with
+           no way to see what is actually going out or to take one file back off,
+           which is the moment a wrong file becomes a sent wrong file. */
+        .attach{margin-top:2px}
+        .attach-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+        /* Drag and drop is a pointer gesture, so the invitation to it is hidden
+           below 900 where there is no pointer. The button beside it does the same
+           job on both. */
+        .attach .drop-hint{display:none}
+        .attach .budget{font-size:12px;color:var(--text-mute);
+                        font-variant-numeric:tabular-nums;white-space:nowrap}
+        .attach .budget.over{color:var(--danger-fg);font-weight:600}
+        /* A dashed outline only while a file is over the sheet. A permanent dashed
+           box would be a second empty state competing with the message field. */
+        .attach.dragging{outline:2px dashed var(--primary);outline-offset:6px;border-radius:var(--radius-xs)}
+        .filelist{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+        .filelist:empty{margin:0}
+        .frow{display:flex;align-items:center;flex-wrap:wrap;gap:10px;min-height:38px;
+              padding:4px 4px 4px 10px;border:1px solid var(--border);
+              border-radius:var(--radius-xs);background:var(--panel-2)}
+        .frow > .ic{color:var(--text-faint);flex:none}
+        .frow .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+                  white-space:nowrap;font-size:13px;color:var(--text-dim)}
+        .frow .sz{font-size:12px;color:var(--text-mute);flex:none;font-variant-numeric:tabular-nums}
+        .frow .rm{color:var(--text-mute)}
+        .frow .rm:hover{color:var(--text);background:var(--panel-4)}
+        /* A file the server would refuse is shown refused rather than removed, so
+           the sender learns which one it was instead of watching a row vanish. */
+        .frow.bad{border-color:var(--danger);background:rgba(224,72,60,.08)}
+        .frow.bad > .ic,.frow.bad .nm{color:var(--danger-fg)}
+        .frow .why{flex:1 1 100%;font-size:11.5px;color:var(--danger-fg);line-height:1.45;
+                   padding:0 4px 2px 10px;order:9}
+
+        /* The send button carries its own upload progress, because a 20MB
+           attachment on Indian mobile data is thirty seconds of nothing happening
+           and a send that looks frozen gets pressed twice. The fill is a child
+           element rather than a background gradient so the label stays legible over
+           it and so the width can be driven straight from the XHR progress event. */
+        #btnSend{position:relative;overflow:hidden}
+        #btnSend .fill{position:absolute;left:0;top:0;bottom:0;width:0;
+                       background:rgba(255,255,255,.30);pointer-events:none;
+                       transition:width .15s linear}
+        #btnSend .lbl{position:relative;font-variant-numeric:tabular-nums}
+        /* Send is disabled while it uploads, so nothing can start a second one, but
+           .btn:disabled fades it to 45% and a progress readout nobody can read is
+           worse than no progress readout. Sending is a working state and has to look
+           like one, so the fade is taken back off for exactly that case. */
+        #btnSend.sending:disabled{opacity:1;cursor:progress}
+
+        /* ============ bottom tabs ============
+           A direct child of <body> and nothing else. Anything position:fixed that
+           lived inside .mail would be captured by the reader pane's transform,
+           which makes that pane the containing block for its fixed descendants. */
+        .tabbar{display:none;position:fixed;left:0;right:0;bottom:0;z-index:60;
+                grid-auto-flow:column;grid-auto-columns:1fr;
+                height:calc(56px + env(safe-area-inset-bottom,0px));
+                padding-bottom:env(safe-area-inset-bottom,0px);
+                padding-left:env(safe-area-inset-left,0px);
+                padding-right:env(safe-area-inset-right,0px);
+                background:var(--panel-2);border-top:1px solid var(--border);
+                transition:transform var(--t-base)}
+        /* Bottom aligned, not centred: the compose disc is twice the height of an
+           icon, and centring every cell would put its label on a line of its own
+           above the other four. */
+        .tab{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:3px;
+             background:none;border:0;color:var(--text-mute);cursor:pointer;min-width:0;
+             padding:0 0 7px;-webkit-tap-highlight-color:transparent;transition:color var(--t-fast)}
+        .tab:active{background:rgba(255,255,255,.04)}
+        .tab-l{font-size:10.5px;font-weight:500;letter-spacing:.01em;line-height:13px}
+        .tab-ic{position:relative;display:grid;place-items:center;width:26px;height:26px}
+        /* The sprite is stroke only, so the active weight is a heavier stroke and
+           full strength text. Colour alone would be the only signal otherwise. */
+        .tab[aria-current="page"]{color:var(--text)}
+        .tab[aria-current="page"] .ic{stroke-width:2.3}
+        .tab-badge{position:absolute;top:-3px;left:14px;min-width:16px;height:16px;padding:0 4px;
+                   border-radius:8px;background:var(--primary);color:#fff;font-size:10px;
+                   font-weight:700;line-height:16px;text-align:center;
+                   font-variant-numeric:tabular-nums;box-shadow:0 0 0 2px var(--panel-2)}
+        .tab-badge[hidden]{display:none}
+        /* Section 10 asks for a compose FAB and a Compose tab, which is one action
+           drawn twice. This is both: a disc cradled out of the bar, whose hit
+           target is still the whole 78 by 56 tab cell, and which covers no row. */
+        .tab-fab .tab-ic{width:48px;height:48px;border-radius:50%;background:var(--primary);
+                         color:#fff;margin-top:-16px;box-shadow:0 6px 16px rgba(0,0,0,.45);
+                         transition:background var(--t-fast)}
+        .tab-fab .ic{stroke-width:2}
+        .tab-fab[aria-current="page"] .ic{stroke-width:2}
+        .tab-fab:active .tab-ic{background:var(--primary-hover)}
 
         #toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;
                 z-index:200;max-width:400px}
@@ -297,81 +643,280 @@
         @keyframes toast-in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 
         /* ============ responsive ============
-           Mirrors the console: 1100 folds three panes into one, 900 turns the
-           rail into a horizontal scroller that keeps its labels, 760 lifts the
-           small end of the type scale and the tap targets. */
-        .btnback{display:none}
-        @media(max-width:1100px){
+           900 is the line between the phone product and the desktop product. The
+           three pane grid folds to two between 900 and 1100, and everything below
+           900 is the phone shell: no rail, a header of its own, one scrolling
+           list, a fixed tab bar and a reader that slides in over the list. */
+        @media(min-width:900px){
+            /* There is a pointer here, so say that dropping works. */
+            .attach .drop-hint{display:inline}
+            /* Two panes, not three. The 186px folder column moved into the rail,
+               and the list takes the width it freed: 532px to 701px at 1440,
+               where the preview finally has somewhere to go. The reader keeps a
+               comfortable measure rather than every recovered pixel. */
+            .mail{grid-template-columns:minmax(420px,1.35fr) minmax(460px,1fr)}
+            /* Density is the point on a desktop. Three line rows show eight
+               messages where one line rows show twenty, and the same markup
+               carries both: display:contents dissolves the two wrappers so the
+               spans below them become items of this one flex row. */
+            .msg{display:flex;align-items:center;gap:10px;min-height:44px;padding:0 14px;
+                 border-bottom:1px solid var(--border-soft)}
+            .msg .av{display:none}
+            .msg .txt,.msg .r1{display:contents}
+            /* flex:0 0 and not 0 1. The sender column is the vertical the eye
+               reads down the list, and on a shrinkable basis it gave up as much
+               as 22.5px on the longest names, so the subject's left edge landed
+               on four different x positions in ten rows. Pinned, the subject
+               absorbs the squeeze instead. */
+            .msg .from{flex:0 0 220px;width:220px;font-size:13px}
+            .msg .subj{flex:0 1 auto;min-width:0;font-size:13px;line-height:20px;color:var(--text-dim)}
+            /* flex:1 1 0 and not 1 1 auto. On auto the subject and the preview
+               shrink in proportion to their own text, so a long subject and a
+               long preview both ellipsise to four characters and neither is
+               readable. From a zero basis the preview only ever takes what the
+               subject did not want. The floor is the other half: at min-width:0
+               six rows in ten computed a preview 0px wide, so the middot and the
+               preview silently disappeared with no rule a reader could infer.
+               96px is a min violation the flex algorithm resolves against the
+               subject, which is the column that can afford it. */
+            .msg .prev{display:none;flex:1 1 0;min-width:96px;color:var(--text-mute);
+                       font-size:12.5px;line-height:20px}
+            .msg .prev::before{content:"\00b7";margin:0 8px;color:var(--text-faint)}
+            .msg .marks{order:8;padding-top:0}
+            .msg .when{order:9;margin-left:auto;font-size:11px}
+            .msg::after{display:none}
+            .msg.unread .from{font-weight:700}
+            /* Last again, and for the same reason as in the base block. */
+            .msg.on .from{font-weight:700}
+        }
+
+        @media(min-width:1340px){
+            .msg .prev{display:block}
+        }
+
+        @media(min-width:1101px){
+            /* Both panes are on screen, so the folder name is already in the
+               topbar and repeating it above the reader is noise. */
+            .rbar-t{display:none}
+            /* Section 9: an empty state carries the action that puts something
+               here. Seven greyed controls above a sentence carry none, and they
+               are the first thing in the pane. The toolbar belongs to a message,
+               so with no message it is not there. Only here: below 1101px the
+               reader is a pane you arrive at, and this bar is the only thing
+               carrying its Back button. */
+            .reader.nomsg .rbar{display:none}
+        }
+
+        @media(min-width:900px) and (max-width:1100px){
+            /* The tablet fold, narrowed from its old max-width:1100px. It must
+               not reach the phone, because display:none cannot be transformed and
+               an unnarrowed block would kill the slide.
+
+               One column now. The folder column used to be kept here because
+               hiding it left a 1000px window with no folder switcher at all: the
+               tab bar is below 900 and the rail did not carry folders. The rail
+               carries them now, and the rail is on screen at every width this
+               block covers. */
             .mail{grid-template-columns:1fr}
-            .folders{display:none}
             .mail .reader{display:none}
             .mail.reading .list{display:none}
             .mail.reading .reader{display:flex}
-            .btnback{display:inline-flex}
+            .rbar .pib[data-act="back"]{display:inline-grid}
         }
-        @media(max-width:900px){
-            /* An icon with no word next to it is a guess, not navigation, so the
-               rail keeps its labels and scrolls sideways instead of shrinking. */
-            .app{grid-template-columns:1fr;grid-template-rows:auto 1fr}
-            .rail{flex-direction:row;align-items:center;gap:4px;overflow-x:auto;overflow-y:hidden;
-                  border-right:0;border-bottom:1px solid var(--border);padding:6px 8px;
-                  scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch;scrollbar-width:none}
-            .rail::-webkit-scrollbar{height:0}
-            .brand{padding:0 10px 0 4px;flex:0 0 auto}
-            .brand .name,.brand .sub{display:none}
-            nav{display:flex;align-items:center;gap:4px;padding:0;flex:0 0 auto}
-            .navgroup{display:none}
-            .nav{flex:0 0 auto;width:auto;scroll-snap-align:start;padding:9px 12px;
-                 min-height:40px;border-radius:var(--radius-sm);white-space:nowrap}
-            .railfoot{margin:0 0 0 auto;flex:0 0 auto;background:none;border:0;padding:0 4px}
-            .railfoot span{display:none}
 
-            /* The title, the search and the actions each take a full row rather
-               than wrapping into ragged fragments, and the buttons share the
-               width evenly instead of one of them sitting alone at 40%. */
-            .topbar{padding:10px 12px;gap:8px}
-            .topbar h1{width:100%}
-            .search{flex:1 1 100%;max-width:none;min-width:0}
-            /* Sized to their labels, not stretched. Stretching made the primary
-               button a full half-row slab of accent colour, which is the exact
-               thing this pass is removing everywhere else. The spacer keeps it
-               on the right so the thumb reaches it. */
-            .topbar .btn{flex:0 0 auto}
+        /* 899.98 and not 900: max-width:900px and min-width:900px both match at
+           exactly 900, and a viewport can land there. */
+        @media(max-width:899.98px){
+            .rail{display:none}
+            .topbar{display:none}
+            .app{grid-template-columns:1fr}
+            .phead{display:flex}
+            .tabbar{display:grid}
+
+            /* The pane is positioned against .main and not against .mail, so it
+               covers the phone header as well as the list. A pane that stopped at
+               the top of the list would leave two stacked title bars, its own and
+               the one it is meant to replace. .main already clips, which is what
+               keeps the parked pane from widening the document. */
+            .main{position:relative}
+            .mail{display:block;position:static;overflow:visible;min-height:0}
+            /* No .folders rule here any more. The folder list lives inside the
+               rail, and the rail is display:none at this width, so its subtree
+               cannot render. The phone folder switcher is the bottom sheet. */
+            .list{height:100%;border-right:0;
+                  padding-bottom:calc(56px + env(safe-area-inset-bottom,0px) + 8px)}
+
+            .reader{position:absolute;inset:0;z-index:30;display:flex;flex-direction:column;
+                    background:var(--panel);
+                    transform:translateX(100%);visibility:hidden;
+                    transition:transform var(--t-base),visibility 0s linear 200ms}
+            /* translateX(0) and never transform:none. A transform other than none
+               makes the element the containing block for any fixed descendant,
+               and a state that reaches none on arrival turns that behaviour on
+               for 200ms and off again, which cannot be reproduced on demand. */
+            body[data-pane="reader"] .reader{transform:translateX(0);visibility:visible;
+                    transition:transform var(--t-base),visibility 0s}
+            /* overflow:hidden and never display:none, so the scroll offset
+               survives the round trip for free and Back returns you to the row
+               you tapped rather than to the top of the folder. */
+            body[data-pane="reader"] .list{overflow:hidden}
+            /* 100% clears the bar but not the compose disc, which is cradled
+               sixteen pixels above it and would otherwise stay on screen as a
+               blue arc at the bottom of an open message. */
+            body[data-pane="reader"] .tabbar{transform:translateY(calc(100% + 24px))}
+            /* The pane covers the phone header, so the toolbar inherits its job
+               of keeping clear of the status bar. */
+            .rbar{padding-top:calc(8px + env(safe-area-inset-top,0px));
+                  padding-left:max(10px,env(safe-area-inset-left,0px));
+                  padding-right:max(10px,env(safe-area-inset-right,0px))}
+            .rbar .pib[data-act="back"]{display:inline-grid}
+            .rbar .pib[data-act="more"]{display:inline-grid}
+            .rbar .pib[data-act="reply"],.rbar .pib[data-act="reply-all"],
+            .rbar .pib[data-act="forward"],.rbar .pib[data-act="archive"]{display:none}
+            /* Once the head has scrolled away the pane is a letter with nobody's
+               name on it, so the bar picks the sender up at the moment the
+               sender line leaves the top of the scroller, and the folder label
+               steps aside for it: one name in this bar, never two. Both halves
+               of that are measured rather than assumed. Sharing the slot
+               ellipsised "Inbox" down to "I..." and left the sender 94px of a
+               390px bar; a strip that merely faded, holding its width while
+               invisible, did the same damage with nothing on screen to show for
+               it, which is why it is zero wide until it is wanted.
+
+               Nothing a thumb aims at moves across the swap. The buttons are
+               held against the right edge by the spacer and both of these sit on
+               the far side of it, so back stays at x10 and the four actions at
+               192, 240, 288 and 336 in either state. */
+            .rbar-who{display:block;flex:0 0 auto;width:0;min-width:0;padding:0;
+                      font-size:13.5px;font-weight:600;color:var(--text);
+                      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+                      opacity:0;transition:opacity var(--t-fast)}
+            .reader.scrolled .rbar-t{display:none}
+            .reader.scrolled .rbar-who{flex:1 1 auto;width:auto;padding:0 4px;opacity:1}
+            .fab{display:grid}
+            .rhead{padding:16px 16px 0}
+            .rframe{min-height:400px}
+            /* The one scroller on this pane, moved up a level. It used to be
+               .rwrap, which froze the toolbar, the subject, the sender, the
+               blocked-images notice and the attachment stack - 475 of 844
+               pixels - on screen for the whole of every message and read the
+               letter through the 369 that were left. The head is part of the
+               message and not part of the chrome, so it scrolls with the letter
+               and the action bar is the only thing that stays. */
+            .rbody{overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+            /* height:100% and not flex:1. As a flex item of a scrolling column,
+               flex:1 would hand the letter whatever the head left over, which is
+               the bug this rule exists to end; a full pane is a definite height
+               the frame can resolve its own against, and the head above it is
+               what pushes the pair into overflow.
+
+               overflow:auto stays rather than going visible, because the frame is
+               the one box here that can refuse the height it is given: with
+               scripting off it cannot report its content height, iOS sizes it to
+               that content instead, and this wrapper scrolling is then the only
+               thing between a long message and a clipped one.
+
+               The padding is the reply disc, which is fixed over a box that
+               scrolls under it: without it the closing lines of every message
+               pass beneath the disc and the last line of a short one is never
+               readable at all. 52 for the disc, 16 for its own inset, 12 of
+               clearance. */
+            .rwrap{flex:none;height:100%;
+                   padding-bottom:calc(80px + env(safe-area-inset-bottom,0px))}
+
+            /* 44 by 44 is the floor for everything that can be tapped, and the
+               16px input rule lives here rather than at 760 so an 850px tablet
+               does not get a tab bar and an iOS zoom on every field at once. */
+            .pib{width:44px;height:44px}
+            .btn,.btn.sm{min-height:44px;font-size:13.5px;padding:8px 16px;border-radius:var(--radius-sm)}
+            .search,.field input,.field textarea{min-height:44px;font-size:16px}
+            .field textarea{min-height:180px}
+            .fold{min-height:52px;padding:8px 12px;font-size:14px;border-radius:var(--radius-sm)}
+            .att{min-height:44px}
+
+            /* Bottom sheets rise from the tab bar. Compose and the unlock prompt
+               take the whole screen instead: a centred card on a phone leaves its
+               own footer under the fold with no way to reach it. */
+            .backdrop{padding:0;place-items:stretch}
+            .sheet{width:100%;max-width:none;max-height:100dvh;height:100dvh;
+                   border-radius:0;border:0;transform:none}
+            .backdrop.open .sheet{transform:none}
+            .bsheet{place-items:end stretch}
+            .bsheet .sheet{height:auto;max-height:80dvh;border-radius:var(--r-lg) var(--r-lg) 0 0;
+                    padding-bottom:env(safe-area-inset-bottom,0px);
+                    transform:translateY(100%);transition:transform var(--t-base)}
+            .bsheet.open .sheet{transform:translateY(0)}
+            .bsheet .grab{display:block}
+            .bsheet .sheet-h{background:var(--panel);border-bottom:0;padding:10px 12px 6px 20px}
+            #fromPhone{display:block}
+            .bsheet .sheet-b{padding:0 8px 12px}
+            /* The message field takes the rest of the screen. A fixed 180px box
+               with 300px of dead panel under it reads as a broken layout. */
+            #composeSheet .sheet-b{padding:16px;display:flex;flex-direction:column;
+                                   padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))}
+            /* Named and no longer :last-child. The attach block now sits below the
+               message, so the positional selector this used to be would have picked
+               that up instead and the textarea would have stopped growing the day
+               attachments landed. */
+            #composeSheet .field-msg{flex:1 1 auto;display:flex;flex-direction:column;min-height:160px}
+            #composeSheet .field-msg textarea{flex:1 1 auto;resize:none}
+            /* Full width, because a thumb reaching the bottom of a full screen sheet
+               should not have to find a 130px target on the left of it. */
+            #btnAttach{flex:1 1 100%}
+            .attach .budget{width:100%;text-align:right}
+            .frow{min-height:44px;padding:5px 5px 5px 12px}
+            .frow .rm{width:44px;height:44px}
+            /* The whole bar goes. placeChrome has already moved Send into the
+               header and the X beside the title is the cancel, so everything
+               below was a second Cancel doing the X's job and a static address
+               wearing the most button-like treatment in the bar, parked in the
+               bottom right corner where a thumb reaches for Send. */
+            #composeSheet .sheet-f{display:none}
+            #unlockSheet .sheet-f{padding-bottom:calc(12px + env(safe-area-inset-bottom,0px))}
+            /* Auto margins and not justify-content:center. On a short screen with
+               the keyboard up, centring a scroll box puts its own top out of
+               reach; auto margins collapse to nothing as soon as the content
+               fills the box. */
+            #unlockSheet .sheet-b{display:flex;flex-direction:column}
+            #unlockSheet .sheet-b > :first-child{margin-top:auto}
+            #unlockSheet .sheet-b > :last-child{margin-bottom:auto}
+            .sheet-f .btn{flex:1 1 auto}
+            .sheet-f .hint{flex:1 1 100%}
+
+            /* The tab bar owns the bottom of the screen, so anything else that
+               parks there has to move up. pwa.js writes its own stylesheet at
+               runtime and puts the install card at bottom:12px over the tabs;
+               body #jmInstall outranks it on specificity, with no !important and
+               without touching that file. */
+            #toasts{left:12px;right:12px;max-width:none;
+                    bottom:calc(56px + env(safe-area-inset-bottom,0px) + 12px)}
+            body #jmInstall{bottom:calc(68px + env(safe-area-inset-bottom,0px))}
         }
+
         @media(max-width:760px){
             body{font-size:13.5px}
-            .btn{min-height:38px}
-            .btn.sm{min-height:36px;font-size:12.5px;padding:4px 11px}
-            .search,.field input,.field textarea{min-height:40px;font-size:16px} /* 16px stops iOS zooming on focus */
-            .att{min-height:38px;font-size:12.5px}
-            .fold{min-height:44px}
-            /* The sender initial is decoration. On a phone it wraps onto a line
-               of its own above the name it belongs to, which is worse than not
-               having it. */
-            .rmeta .avatar{display:none}
-            .rhead{padding:16px 14px 0}
-            /* Three lines of text at desktop padding read as one solid block on a
-               phone. The row needs the air and a border that is actually visible. */
-            .msg{min-height:44px;padding:13px 14px;border-bottom-color:var(--border)}
             .pill{font-size:11px}
-            .msg .when{font-size:11.5px}
-            .msg .subj{font-size:13px}
-            .msg .prev{font-size:12.5px}
-            .listfoot{font-size:12.5px}
+            .att{font-size:12.5px}
             .brand .sub{font-size:11.5px}
-            /* A centred box on a phone leaves content under the fold with no way
-               to reach it, so the sheets become full height. */
-            .backdrop{padding:0;place-items:stretch}
-            .sheet{width:100%;max-width:none;max-height:100dvh;border-radius:0;border:0}
-            .sheet-f{position:sticky;bottom:0}
-            .sheet-f .btn{flex:1 1 auto;min-height:42px}
-            #toasts{right:10px;left:10px;bottom:10px;max-width:none}
+            .rhead h2{font-size:17px}
+        }
+
+        @media(prefers-reduced-motion:reduce){
+            .reader,.tabbar,.backdrop,.sheet,.bsheet .sheet,.fab,.msg,.btn,.pib,.tab,.mrow,.fold,.nav,
+            .rbar-who{
+                transition:none}
+            .sk,.spin,.toast,.pib.busy .ic{animation:none}
+            .sk{background:var(--panel-3)}
         }
     </style>
 </head>
 <body>
+<th:block th:replace="~{fragments/icons :: sprite}"></th:block>
+
 <div class="app">
 
+    <!-- display:none below 900px rather than removed, so no listener on this
+         page has to guard for a missing node at one width and not another. -->
     <aside class="rail">
         <div class="brand">
             <div class="mark">J</div>
@@ -379,76 +924,305 @@
         </div>
         <nav>
             <div class="navgroup">Mailbox</div>
-            <a class="nav" href="/mail" aria-current="true"><span class="ic">&#9993;</span><span>Inbox</span><span class="badge" id="railUnread">0</span></a>
-            <button class="nav" type="button" id="railCompose"><span class="ic">&#9998;</span><span>Compose</span></button>
+            <button class="nav" type="button" id="railCompose">
+                <svg class="ic" aria-hidden="true"><use href="#i-compose"/></svg><span>Compose</span></button>
+            <!-- The six folders, rendered here by renderFolders and into the
+                 phone sheet from the same string. This used to be a 186px
+                 column of its own beside a rail that was more than half empty,
+                 which is how "Inbox" came to be on screen three times at once,
+                 twice with the same active state. There is one Inbox now and
+                 this is it: no static row above it to go stale. -->
+            <div class="folders" id="folders"></div>
             <div class="navgroup">Campaigns</div>
-            <a class="nav" href="/app"><span class="ic">&#9670;</span><span>Campaign Studio</span></a>
+            <a class="nav" href="/app">
+                <svg class="ic" aria-hidden="true"><use href="#i-campaign"/></svg><span>Campaign Studio</span></a>
             <div class="navgroup">Session</div>
-            <button class="nav" type="button" id="railLock"><span class="ic">&#128274;</span><span>Close mailbox</span></button>
-            <a class="nav" href="/logout"><span class="ic">&#8617;</span><span>Sign out</span></a>
+            <!-- The install card can be dismissed, and is, for a fortnight. This is
+                 how someone gets back to it without clearing site data. -->
+            <button class="nav" type="button" data-jm-install>
+                <svg class="ic" aria-hidden="true"><use href="#i-install"/></svg><span>Install app</span></button>
+            <button class="nav" type="button" id="railLock">
+                <svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg><span>Close mailbox</span></button>
+            <a class="nav" href="/logout">
+                <svg class="ic" aria-hidden="true"><use href="#i-logout"/></svg><span>Sign out</span></a>
         </nav>
         <div class="railfoot">
-            <div class="avatar" id="railAvatar">?</div><span id="railEmail">signed in</span>
+            <div class="avatar" id="railAvatar" data-c="0">?</div><span id="railEmail">signed in</span>
         </div>
     </aside>
 
     <main class="main">
+
+        <!-- The phone header. Two rows, exactly one shown, switched by
+             body.searching. Above 900px it is display:none and .topbar is the
+             header instead. -->
+        <header class="phead" id="phead">
+            <div class="phead-row" data-mode="title">
+                <button class="pib" type="button" id="pbAccount" aria-label="Account and settings">
+                    <span class="avatar av-sm" id="pheadAvatar" data-c="0"
+                          th:text="${#strings.isEmpty(userEmail)} ? '?' : ${#strings.toUpperCase(#strings.substring(userEmail,0,1))}">?</span>
+                </button>
+                <h1 class="ptitle" id="pheadTitle">Inbox</h1>
+                <button class="pib" type="button" id="pbSearch" aria-label="Search this mailbox">
+                    <svg class="ic ic-lg" aria-hidden="true"><use href="#i-search"/></svg></button>
+                <button class="pib" type="button" id="pbRefresh" aria-label="Refresh">
+                    <svg class="ic ic-lg" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+            </div>
+            <div class="phead-row" data-mode="search" id="pheadSearch">
+                <button class="pib" type="button" id="pbSearchBack" aria-label="Close search">
+                    <svg class="ic ic-lg" aria-hidden="true"><use href="#i-back"/></svg></button>
+                <!-- #q is moved into this slot on a phone and back into #qDesk
+                     above 900px. One node, one listener, one value: a second
+                     mirrored input is duplicated state that desyncs the first
+                     time the phone is rotated mid search. -->
+                <span class="qslot" id="qPhone"></span>
+            </div>
+        </header>
+
         <div class="topbar">
             <h1 id="paneTitle">Inbox</h1>
-            <input class="search" id="q" type="search" placeholder="Search this mailbox..." autocomplete="off">
+            <span class="qslot" id="qDesk">
+                <input class="search" id="q" type="search" inputmode="search" enterkeyhint="search"
+                       placeholder="Search this mailbox..." autocomplete="off">
+            </span>
             <button class="btn sm" type="button" id="btnRefresh">Refresh</button>
             <span class="spacer"></span>
             <button class="btn pri" type="button" id="btnCompose">Compose</button>
         </div>
 
         <div class="mail" id="mailGrid">
-            <div class="folders" id="folders"></div>
-            <div class="list" id="list"></div>
-            <div class="reader" id="reader"></div>
+            <!-- The one scrolling box on a phone. Ten skeleton rows ship in the
+                 template, so the first paint is never an empty charcoal box and
+                 costs no JavaScript to produce; renderList replaces the subtree. -->
+            <div class="list" id="list" aria-busy="true">
+                <div class="skel" aria-hidden="true">
+                    <div class="skrow"><span class="sk sk-av"></span><span class="skb">
+                        <span class="sk sk-1"></span><span class="sk sk-2"></span><span class="sk sk-3"></span></span></div>
+                    <div class="skrow"><span class="sk sk-av"></span><span class="skb">
+                        <span class="sk sk-1"></span><span class="sk sk-2"></span><span class="sk sk-3"></span></span></div>
+                    <div class="skrow"><span class="sk sk-av"></span><span class="skb">
+                        <span class="sk sk-1"></span><span class="sk sk-2"></span><span class="sk sk-3"></span></span></div>
+                    <div class="skrow"><span class="sk sk-av"></span><span class="skb">
+                        <span class="sk sk-1"></span><span class="sk sk-2"></span><span class="sk sk-3"></span></span></div>
+                    <div class="skrow"><span class="sk sk-av"></span><span class="skb">
+                        <span class="sk sk-1"></span><span class="sk sk-2"></span><span class="sk sk-3"></span></span></div>
+                    <div class="skrow"><span class="sk sk-av"></span><span class="skb">
+                        <span class="sk sk-1"></span><span class="sk sk-2"></span><span class="sk sk-3"></span></span></div>
+                    <div class="skrow"><span class="sk sk-av"></span><span class="skb">
+                        <span class="sk sk-1"></span><span class="sk sk-2"></span><span class="sk sk-3"></span></span></div>
+                    <div class="skrow"><span class="sk sk-av"></span><span class="skb">
+                        <span class="sk sk-1"></span><span class="sk sk-2"></span><span class="sk sk-3"></span></span></div>
+                    <div class="skrow"><span class="sk sk-av"></span><span class="skb">
+                        <span class="sk sk-1"></span><span class="sk sk-2"></span><span class="sk sk-3"></span></span></div>
+                    <div class="skrow"><span class="sk sk-av"></span><span class="skb">
+                        <span class="sk sk-1"></span><span class="sk sk-2"></span><span class="sk sk-3"></span></span></div>
+                </div>
+            </div>
+
+            <!-- Always in the DOM and parked at translateX(100%), never
+                 display:none: a pane that does not exist cannot slide. -->
+            <section class="reader" id="reader" aria-hidden="true">
+                <div class="rbar">
+                    <button class="pib" type="button" data-act="back" aria-label="Back to the message list">
+                        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-back"/></svg></button>
+                    <span class="rbar-t" id="rbarTitle">Inbox</span>
+                    <!-- The sender, carried by the bar once the head has scrolled
+                         past. aria-hidden because it is the same name the head
+                         already gives, repeated for the eye and not for a reader
+                         that has no scroll position to lose. -->
+                    <span class="rbar-who" id="rbarWho" aria-hidden="true"></span>
+                    <span class="spacer"></span>
+                    <button class="pib" type="button" data-act="reply" id="rReply" aria-label="Reply">
+                        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-reply"/></svg></button>
+                    <button class="pib" type="button" data-act="reply-all" id="rReplyAll" aria-label="Reply to everyone">
+                        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-reply-all"/></svg></button>
+                    <button class="pib" type="button" data-act="forward" id="rForward" aria-label="Forward">
+                        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-forward"/></svg></button>
+                    <button class="pib" type="button" data-act="flag" id="rStar" aria-label="Star this message">
+                        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-star"/></svg></button>
+                    <button class="pib" type="button" data-act="archive" id="rArchive" aria-label="Archive this message">
+                        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-archive"/></svg></button>
+                    <button class="pib" type="button" data-act="move" id="rMove" aria-label="Move to folder">
+                        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-folder-move"/></svg></button>
+                    <button class="pib" type="button" data-act="delete" id="rDelete" aria-label="Delete this message">
+                        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-trash"/></svg></button>
+                    <button class="pib" type="button" data-act="more" id="rMore" aria-label="More actions">
+                        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-more-v"/></svg></button>
+                </div>
+                <div class="rbody" id="rbody"></div>
+                <button class="fab fab-in-pane" type="button" data-act="reply" id="rFab" aria-label="Reply">
+                    <svg class="ic ic-lg" aria-hidden="true"><use href="#i-reply"/></svg></button>
+            </section>
         </div>
     </main>
 </div>
 
-<div class="backdrop" id="composeSheet">
-    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="composeTitle">
-        <div class="sheet-h"><h3 id="composeTitle">New message</h3>
-            <span class="spacer"></span><span class="pill ac" id="composeFrom">from</span></div>
-        <div class="sheet-b">
-            <div class="field"><label for="cTo">To</label>
-                <input id="cTo" autocomplete="off" placeholder="name@example.com, second@example.com"></div>
-            <div class="field"><label for="cCc">Cc</label>
-                <input id="cCc" autocomplete="off" placeholder="optional"></div>
-            <div class="field"><label for="cSubject">Subject</label><input id="cSubject" autocomplete="off"></div>
-            <div class="field"><label for="cBody">Message</label><textarea id="cBody" rows="12"></textarea></div>
-        </div>
-        <div class="sheet-f">
-            <button class="btn pri" type="button" id="btnSend">Send</button>
-            <button class="btn" type="button" id="btnCancel">Cancel</button>
+<!-- Body level and nothing else. .reader carries a transform below 900px, which
+     would make it the containing block for any position:fixed descendant, so a
+     tab bar nested inside .mail would ride away with the pane. -->
+<nav class="tabbar" id="tabbar" aria-label="Mailbox">
+    <button class="tab" type="button" data-tab="inbox" aria-current="page">
+        <span class="tab-ic"><svg class="ic" aria-hidden="true"><use href="#i-inbox"/></svg>
+            <span class="tab-badge" id="tabUnread" hidden>0</span></span>
+        <span class="tab-l">Inbox</span></button>
+    <button class="tab" type="button" data-tab="folders">
+        <span class="tab-ic"><svg class="ic" aria-hidden="true"><use href="#i-folder"/></svg></span>
+        <span class="tab-l">Folders</span></button>
+    <button class="tab tab-fab" type="button" data-tab="compose" id="tabCompose">
+        <span class="tab-ic"><svg class="ic" aria-hidden="true"><use href="#i-compose"/></svg></span>
+        <span class="tab-l">Compose</span></button>
+    <button class="tab" type="button" data-tab="search">
+        <span class="tab-ic"><svg class="ic" aria-hidden="true"><use href="#i-search"/></svg></span>
+        <span class="tab-l">Search</span></button>
+    <button class="tab" type="button" data-tab="you">
+        <span class="tab-ic"><svg class="ic" aria-hidden="true"><use href="#i-user"/></svg></span>
+        <span class="tab-l">You</span></button>
+</nav>
+
+<div class="backdrop bsheet" id="foldersSheet">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="foldersSheetTitle">
+        <span class="grab" aria-hidden="true"></span>
+        <div class="sheet-h"><h3 id="foldersSheetTitle">Folders</h3><span class="spacer"></span>
+            <button class="pib" type="button" data-close aria-label="Close">
+                <svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+        <div class="sheet-b" id="sheetFolders"></div>
+    </div>
+</div>
+
+<!-- The literal fix for the reported defect. Install app, Close mailbox and
+     Sign out used to sit 380px, 496px and 633px into a rail 390px wide that hid
+     its own scrollbar, so nobody found them. They are full width rows here. -->
+<div class="backdrop bsheet" id="accountSheet">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="accountSheetTitle">
+        <span class="grab" aria-hidden="true"></span>
+        <div class="sheet-h">
+            <span class="avatar av-lg" id="sheetAvatar" data-c="0">?</span>
+            <div class="who"><b id="accountSheetTitle">Signed in</b>
+                <span class="muted" id="sheetEmail">signed in</span></div>
             <span class="spacer"></span>
-            <span class="muted" style="font-size:12px">Sends through the jarurat.care mail server</span>
+            <button class="pib" type="button" data-close aria-label="Close">
+                <svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+        <div class="sheet-b sheet-menu">
+            <a class="mrow" href="/app" id="shStudio">
+                <svg class="ic" aria-hidden="true"><use href="#i-campaign"/></svg><span>Campaign Studio</span>
+                <svg class="ic ic-sm chev" aria-hidden="true"><use href="#i-next"/></svg></a>
+            <button class="mrow" type="button" data-jm-install>
+                <svg class="ic" aria-hidden="true"><use href="#i-install"/></svg><span>Install app</span></button>
+            <button class="mrow" type="button" id="shLock">
+                <svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg><span>Close mailbox</span></button>
+            <a class="mrow danger" href="/logout">
+                <svg class="ic" aria-hidden="true"><use href="#i-logout"/></svg><span>Sign out</span></a>
         </div>
     </div>
 </div>
 
-<!-- The console session and the mailbox are two different logins. This asks for the
-     second one. It is not a page the browser can skip: every /api/mail endpoint
-     answers 409 until the mail server itself has accepted this password. -->
+<!-- The reader toolbar has room for four controls on a phone. This sheet carries
+     the rest, so reply all, forward and archive exist there rather than being
+     desktop only actions. -->
+<div class="backdrop bsheet" id="moreSheet">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="moreSheetTitle">
+        <span class="grab" aria-hidden="true"></span>
+        <div class="sheet-h"><h3 id="moreSheetTitle">Message</h3><span class="spacer"></span>
+            <button class="pib" type="button" data-close aria-label="Close">
+                <svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+        <div class="sheet-b sheet-menu">
+            <button class="mrow" type="button" data-more="reply-all">
+                <svg class="ic" aria-hidden="true"><use href="#i-reply-all"/></svg><span>Reply to everyone</span></button>
+            <button class="mrow" type="button" data-more="forward">
+                <svg class="ic" aria-hidden="true"><use href="#i-forward"/></svg><span>Forward</span></button>
+            <button class="mrow" type="button" data-more="archive" id="moreArchive">
+                <svg class="ic" aria-hidden="true"><use href="#i-archive"/></svg><span>Archive</span></button>
+            <button class="mrow" type="button" data-more="unread">
+                <svg class="ic" aria-hidden="true"><use href="#i-mail"/></svg><span>Mark as unread</span></button>
+        </div>
+    </div>
+</div>
+
+<div class="backdrop" id="composeSheet">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="composeTitle">
+        <div class="sheet-h">
+            <button class="pib" type="button" id="btnCancelTop" aria-label="Discard and close">
+                <svg class="ic ic-lg" aria-hidden="true"><use href="#i-close"/></svg></button>
+            <!-- Two slots for one address node, both inside .sheet-h as section
+                 14.2 asks. On a laptop it is a pill beside Send; on a phone it
+                 is a caption under the title, which is the only place on that
+                 screen where a static label cannot be mistaken for the primary
+                 action. It used to sit in the footer, in the bottom right
+                 corner, wearing a blue outline. -->
+            <div class="ctitle">
+                <h3 id="composeTitle">New message</h3>
+                <span class="qslot" id="fromPhone"></span>
+            </div>
+            <span class="spacer"></span>
+            <span class="qslot" id="fromHead"><span class="pill ac" id="composeFrom">from</span></span>
+            <!-- #btnSend is one node that moves between the footer and this slot
+                 on a phone. appendChild keeps its listener and its disabled
+                 state, so a rotation mid send does not lose either. -->
+            <span class="qslot" id="sendHead"></span>
+        </div>
+        <div class="sheet-b">
+            <div class="field"><label for="cTo">To</label>
+                <input id="cTo" autocomplete="off" inputmode="email" placeholder="name@example.com, second@example.com"></div>
+            <div class="field"><label for="cCc">Cc</label>
+                <input id="cCc" autocomplete="off" inputmode="email" placeholder="optional"></div>
+            <div class="field"><label for="cSubject">Subject</label><input id="cSubject" autocomplete="off"></div>
+            <div class="field field-msg"><label for="cBody">Message</label><textarea id="cBody" rows="12"></textarea></div>
+            <!-- Below the message and not above it, because the order on screen is
+                 the order of the job: say the thing, then add what goes with it.
+                 The real <input type="file"> is hidden and driven by the button
+                 beside it, so the control can be a .btn like every other control on
+                 this sheet instead of the browser's own grey box, which cannot be
+                 styled, cannot be made 44px on a phone and reads as a form from
+                 1998 sitting inside a sheet that is not one. -->
+            <div class="attach" id="attachField">
+                <div class="attach-bar">
+                    <button class="btn" type="button" id="btnAttach">
+                        <svg class="ic" aria-hidden="true"><use href="#i-attach"/></svg>
+                        <span>Attach files</span></button>
+                    <span class="muted hint drop-hint">or drop them here</span>
+                    <span class="spacer"></span>
+                    <span class="budget" id="attachBudget"></span>
+                </div>
+                <input type="file" id="cFiles" multiple hidden>
+                <!-- Filled by renderFiles(). A list and not a count, so the sender can
+                     see what is going out and take one back off before it does. -->
+                <ul class="filelist" id="fileList"></ul>
+            </div>
+        </div>
+        <div class="sheet-f">
+            <!-- Two children rather than a text node: .fill is the upload progress
+                 and .lbl is what it says. sendMessage() writes to #sendLabel, never
+                 to the button itself, because textContent on the button would take
+                 the fill out with it. -->
+            <span class="qslot" id="sendFoot"><button class="btn pri" type="button" id="btnSend"><span
+                    class="fill" id="sendFill"></span><span class="lbl" id="sendLabel">Send</span></button></span>
+            <button class="btn" type="button" id="btnCancel">Cancel</button>
+            <span class="spacer"></span>
+            <span class="muted hint">Sends through the jarurat.care mail server</span>
+        </div>
+    </div>
+</div>
+
+<!-- Signing into Campaign Studio and opening a mailbox are two different things,
+     and this asks for the second one. It is deliberately outside the pane state
+     machine: it has no dismiss, it can arrive at any moment, and a back gesture
+     must never be able to pop it. -->
 <div class="backdrop" id="unlockSheet">
     <div class="sheet" style="width:min(420px,100%)" role="dialog" aria-modal="true" aria-labelledby="unlockTitle">
         <div class="sheet-h"><h3 id="unlockTitle">Open your mailbox</h3></div>
         <div class="sheet-b">
-            <p class="muted" style="margin:0 0 14px;font-size:12.5px" id="unlockWhy">
-                Campaign Studio signed you in. The mail server needs its own password before
-                it will hand over your mail.</p>
-            <div class="field"><label for="uAddress">Mailbox</label>
-                <input id="uAddress" autocomplete="username" placeholder="you@jarurat.care"></div>
-            <div class="field"><label for="uPassword">Mailbox password</label>
+            <p class="muted hint" id="unlockWhy">
+                Enter the password for your jarurat.care email address to see your mail here.
+                It is the same one you use for email on your phone.</p>
+            <div class="field"><label for="uAddress">Email address</label>
+                <input id="uAddress" autocomplete="username" inputmode="email" placeholder="you@jarurat.care"></div>
+            <div class="field"><label for="uPassword">Email password</label>
                 <input id="uPassword" type="password" autocomplete="current-password"></div>
         </div>
         <div class="sheet-f">
             <button class="btn pri" type="button" id="btnUnlock">Open mailbox</button>
             <span class="spacer"></span>
-            <span class="muted" style="font-size:12px">Held for this session only</span>
+            <span class="muted hint">Kept for this visit only, never saved</span>
         </div>
     </div>
 </div>
@@ -459,6 +1233,12 @@
     const PERMS = /*[[${permissions}]]*/ [];
     const ME = { email: /*[[${userEmail}]]*/ '', name: /*[[${userName}]]*/ '', role: /*[[${userRole}]]*/ '' };
 </script>
-<script src="/js/mail.js"></script>
+<!-- The query string is half of the cache fix. sw.js precaches /js/mail.js
+     stale while revalidate and never caches HTML, so the first launch after a
+     deploy would otherwise hand an installed phone this template with the
+     previous script: no tab wiring, no data-pane, no slide. The other half is
+     bumping VERSION in sw.js, which is a different file and a different owner. -->
+<script src="/js/mail.js?v=attach1"></script>
+<th:block th:replace="~{fragments/pwa :: script}"></th:block>
 </body>
 </html>

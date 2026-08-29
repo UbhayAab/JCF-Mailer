@@ -3,40 +3,437 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>JCF Campaign Studio</title>
+    <title>Jarurat Mail</title>
     <link rel="stylesheet" href="/css/style.css">
     <link rel="icon" href="/logo.png">
+    <th:block th:replace="~{fragments/pwa :: head}"></th:block>
+
+    <script>
+        /* Runs before first paint, so the install call to action is never offered
+           inside the app once it is installed. pwa.js answers that click by doing
+           nothing at all, and a button that silently does nothing is worse than no
+           button: section 13 of the spec, no control whose state is invisible. */
+        (function () {
+            var mq = window.matchMedia;
+            var standalone = (mq && (mq('(display-mode: standalone)').matches
+                                  || mq('(display-mode: minimal-ui)').matches))
+                          || window.navigator.standalone === true;
+            if (standalone) document.documentElement.setAttribute('data-installed', '1');
+        })();
+    </script>
+
+    <style>
+        /* ==================================================================
+           The landing page. Phone first, because a phone visitor who is not
+           signed in is here to install, not to sign in. Above 900px that
+           premise inverts, and the laptop block at the end of this file
+           recomposes the page around the opposite one. Nothing before that
+           block may differ from what the phone renders.
+
+           Everything below is layout that static/css/style.css does not carry.
+           Controls, alerts and every colour token still come from that file, so
+           this page cannot drift from the console; only the shapes that exist
+           nowhere else are defined here. Nothing on this page is styled by an
+           inline style attribute any more, which is what stopped the previous
+           version from being designed at all.
+           ================================================================== */
+
+        /* .ic, .ic-lg and .ic-sm are section 6 of docs/UI-SPEC.md and now live in
+           style.css, which both entry pages load. mail.html keeps its own copy
+           because it loads no stylesheet; these two must not, or the icon set
+           quietly forks between the pages a person walks through in one session. */
+
+        .lp {
+            min-height: 100vh; min-height: 100dvh;
+            max-width: 1080px; margin: 0 auto; padding: 28px 20px 32px;
+            display: flex; flex-direction: column; gap: 32px;
+            animation: lp-in .28s cubic-bezier(.2, .7, .3, 1);
+        }
+        @keyframes lp-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+        /* An anchor inherits style.css's link colour, and a:visited outranks a
+           bare class selector, so every link that has to look like something
+           other than a link is matched element-plus-class here. */
+        .lp a { text-decoration: none; }
+        .lp a:hover { text-decoration: none; }
+
+        .lp-main { display: grid; gap: 28px; }
+
+        /* ---------- hero ---------- */
+        .lp-tile {
+            width: 56px; height: 56px; border-radius: 14px; background: #fff;
+            display: grid; place-items: center; margin-bottom: 20px;
+            box-shadow: 0 10px 32px rgba(0, 0, 0, .48);
+        }
+        /* The app icon is black ink on transparency, so it needs its own white
+           ground. It is also the exact tile that ends up on the home screen. */
+        .lp-tile img { width: 44px; height: 44px; display: block; }
+
+        .lp-eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: .09em;
+                      text-transform: uppercase; color: var(--text-mute); margin: 0 0 8px; }
+        .lp-h1 { margin: 0 0 12px; font-size: clamp(26px, 7vw, 30px); line-height: 1.15;
+                 font-weight: 700; letter-spacing: -.03em; color: var(--text); }
+        .lp-lede { margin: 0 0 24px; font-size: 15px; line-height: 1.6;
+                   color: var(--text-dim); max-width: 30em; }
+
+        .lp-cta { display: flex; flex-wrap: wrap; gap: 10px; }
+        .lp-b { min-height: 46px; padding: 0 20px; font-size: 14.5px;
+                border-radius: var(--r-sm, 8px); flex: 1 1 auto; justify-content: center; }
+        @media (min-width: 560px) { .lp-b { flex: 0 0 auto; } }
+
+        /* Phone: install is the headline action and carries the one accent. */
+        .lp-install { background: var(--primary); border-color: var(--primary);
+                      color: #fff; font-weight: 600; }
+        .lp-install:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+        .lp a.lp-signin { color: var(--text); }
+
+        .lp-note { margin: 12px 0 0; font-size: 12.5px; color: var(--text-mute); }
+
+        /* ---------- how it installs ---------- */
+        .lp-h2 { margin: 0 0 10px; font-size: 16px; font-weight: 620;
+                 letter-spacing: -.01em; color: var(--text); }
+        .lp-steps { list-style: none; margin: 0; padding: 0; }
+        .lp-steps li { display: grid; grid-template-columns: auto minmax(0, 1fr);
+                       gap: 12px; align-items: start; padding: 12px 0; }
+        .lp-steps li + li { border-top: 1px solid var(--border); }
+        .lp-stepic { width: 34px; height: 34px; border-radius: 9px; flex: none;
+                     background: var(--panel-3); border: 1px solid var(--border);
+                     display: grid; place-items: center; color: var(--text-dim); }
+        .lp-steps b { display: block; font-size: 13.5px; font-weight: 600; color: var(--text); }
+        .lp-steps span span { display: block; margin-top: 2px; font-size: 12.5px;
+                              line-height: 1.55; color: var(--text-mute); }
+
+        /* ---------- the two surfaces ---------- */
+        .lp-panel { background: var(--panel); border: 1px solid var(--border);
+                    border-radius: var(--r-md, 12px); padding: 6px 14px 10px; }
+        .lp-panel .lp-h2 { margin: 12px 0 4px; }
+        .lp-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+                  gap: 12px; align-items: center; padding: 14px 0; min-height: 44px; }
+        .lp-row + .lp-row { border-top: 1px solid var(--border); }
+        .lp a.lp-row { color: var(--text); }
+        .lp a.lp-row:hover b { color: var(--primary-3); }
+        .lp-row > .ic-lg { color: var(--text-mute); }
+        .lp-row-t b { display: block; font-size: 13.5px; font-weight: 600; }
+        .lp-row-t span { display: block; font-size: 12.5px; line-height: 1.5; color: var(--text-mute); }
+        .lp-chev { color: var(--text-faint); }
+
+        /* The install row is a button and not a link, because it opens the
+           install card in place rather than going anywhere. A button arrives
+           carrying the user agent's own font, ground, border and centring, none
+           of which a row inside this panel wants. */
+        .lp button.lp-row { width: 100%; background: none; border: 0; font: inherit;
+                            color: var(--text); text-align: left; cursor: pointer; }
+        .lp button.lp-row:hover b { color: var(--primary-3); }
+
+        /* That row, and the line about who to ask for an address, are both
+           addressed to a laptop: the one device that cannot install this, and
+           the one the phone's three-step strip is useless on. Below 900px the
+           hero button and the strip do that work, so this group is absent from
+           the page rather than merely invisible in it. */
+        .lp-panelfoot { display: none; }
+        .lp-help { display: none; }
+        .lp-panelsub { display: none; }
+
+        /* ---------- capability facts ---------- */
+        /* grid-auto-rows:1fr is what makes the four tiles one height rather than
+           two. Each implicit row is otherwise sized to its own content, and the
+           second row's captions are the two that wrap, so at 1440 this was a
+           74px row sitting on a 92px row: four cards claiming to be a set and
+           measurably not one. Equal flex factors on rows in a grid of indefinite
+           height resolve every row to the tallest row's contribution, so the set
+           is levelled without hard-coding a height that the copy would outgrow. */
+        .lp-facts { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    grid-auto-rows: 1fr; }
+        .lp-facts li { background: var(--panel); border: 1px solid var(--border);
+                       border-radius: var(--r-sm, 8px); padding: 12px 14px;
+                       display: grid; grid-template-columns: auto minmax(0, 1fr);
+                       gap: 2px 12px; align-items: start; }
+        .lp-facts .ic { color: var(--text-faint); margin-top: 1px; }
+        .lp-facts b { grid-column: 2; font-size: 13.5px; font-weight: 600;
+                      color: var(--text); letter-spacing: -.005em; }
+        .lp-facts span { grid-column: 2; font-size: 12px; line-height: 1.5; color: var(--text-mute); }
+
+        /* ---------- foot ---------- */
+        /* margin-top:auto rather than a grown .lp-main. Letting the main block
+           absorb the leftover height instead stretches its own rows, which opened
+           a 140px hole between the hero and the install strip on a laptop. */
+        .lp-foot { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center;
+                   margin-top: auto; padding-top: 20px; border-top: 1px solid var(--border);
+                   font-size: 12px; color: var(--text-mute); }
+        .lp a.lp-ext { color: var(--text-mute); display: inline-flex; align-items: center;
+                       gap: 6px; margin-left: auto; min-height: 44px; }
+        .lp a.lp-ext:hover { color: var(--text); text-decoration: underline; }
+
+        /* ---------- laptop ---------- */
+        /* Everything above this line is written for a phone held by somebody who
+           can install the app. A laptop cannot install it, and the person in
+           front of one has come here to get in, so above 900px the page is
+           composed the other way round instead of being the same page made
+           wider: Sign in is the only call to action in the hero, the three
+           install steps go because they are instructions for a device that is
+           not this one, and install survives as one row in the panel opposite.
+           Two columns and a footer, not the five stacked bands this was. */
+        @media (min-width: 900px) {
+            /* .lp-main is a wrapper the phone's single column needs and this
+               composition does not. display:contents lifts its three children
+               into this grid as items in their own right; the div carries no
+               role, so losing the box and its node in the accessibility tree
+               together costs nothing here. */
+            .lp-main { display: contents; }
+
+            .lp {
+                /* A framing inset, not decoration. This page holds about 620px
+                   of content, so in a 900px window there are 250-odd px with
+                   nowhere to be, and every one of them that is not spent here
+                   is spent widening the gaps between the bands instead. Taking
+                   them at the top and bottom edges is the one place a reader
+                   reads as margin rather than as a hole. */
+                padding: clamp(56px, 13vh, 128px) 32px clamp(28px, 6vh, 56px);
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) minmax(320px, 424px);
+                grid-template-areas: "hero  ways"
+                                     "facts ways"
+                                     "foot  foot";
+                column-gap: 56px; row-gap: 40px;
+                align-items: start;
+                /* Whatever the inset above does not absorb is spread evenly
+                   between the bands instead of collecting in one place. The
+                   flex column this replaced gave the whole remainder to the
+                   footer's auto margin, which measured as 168px of nothing
+                   above the footer while the bands above it sat 40px apart. */
+                align-content: space-between;
+            }
+            .lp-hero  { grid-area: hero; }
+            .lp-ways  { grid-area: ways; }
+            .lp-facts { grid-area: facts; }
+            /* The footer is a grid item in a row of its own now, so the auto
+               margin that used to push it down a flex column has nothing left
+               to do and is taken back rather than left to fight the grid. */
+            .lp-foot  { grid-area: foot; margin-top: 0; }
+
+            /* Three steps that open "Tap Install" and "On an iPhone, tap Share"
+               are addressed to a phone in the reader's hand. Widening them to
+               1016px never made them true. One row in the panel replaces them,
+               which is where somebody on a laptop would look for it. */
+            .lp-how { display: none; }
+
+            .lp-tile { width: 64px; height: 64px; border-radius: 16px; margin-bottom: 24px; }
+            .lp-tile img { width: 50px; height: 50px; }
+            /* 16px is the h2 step of the scale in section 5, and takes the -.01em
+               that section puts on everything from 16px up. The phone's 15px in a
+               540px column read as a caption under a 30px headline. */
+            .lp-lede { font-size: 16px; line-height: 1.6; letter-spacing: -.01em;
+                       max-width: 26em; margin-bottom: 28px; }
+
+            /* Install leaves the hero. On a laptop it stood first in reading
+               order at 158px with the action the visitor actually came for
+               beside it as an 87px chip, and the fill swap between those two
+               was the only thing on this page that changed between a phone and
+               a laptop at all. */
+            .lp-cta > .lp-install { display: none; }
+            .lp-b { min-height: 48px; padding: 0 30px; font-size: 15px; }
+            .lp a.lp-signin { min-width: 196px;
+                              background: var(--primary); border-color: var(--primary);
+                              color: #fff; font-weight: 600; }
+            .lp a.lp-signin:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+            /* The note is install copy, and install is no longer in this column. */
+            .lp-note { display: none; }
+
+            /* 16px, up from the phone's 12px, and on the 4px scale in section
+               4. Two abreast in a 536px column these cards were 75px of box
+               around 30px of ink; the height they gain here is height the bands
+               above and below them no longer have to absorb. */
+            .lp-facts li { padding: 16px; }
+
+            /* The two columns have to end on the same line. align-items:start
+               above leaves this card at its content height, which measured 428px
+               against a left column of 687px: the card stopped 142px short and
+               the reader's eye found the bottom of the page twice. Stretching
+               the aside across both rows it already spans, and letting the panel
+               fill it, ends both columns on one line by construction rather than
+               by a number that would go stale the moment a caption changed. */
+            .lp-ways { align-self: stretch; }
+
+            /* Height the card gains has to be spent, not left in a hole at the
+               bottom. A flex column hands it to the three destination rows in
+               equal shares, so the extra reads as the card breathing and the
+               hairline between the rows stays welded to the row below it. The
+               heading, the subtitle and the help line keep their own size: they
+               are copy, and stretching copy is how a card starts to look like a
+               table. */
+            .lp-panel { padding: 8px 18px 16px; display: flex; flex-direction: column; height: 100%; }
+            .lp-panel > .lp-row { flex: 1 1 auto; }
+            .lp-panelfoot > .lp-row { flex: 1 1 auto; }
+            .lp-panel .lp-h2 { margin: 14px 0 4px; }
+            .lp-panelsub { display: block; margin: 0 0 4px; font-size: 12.5px;
+                           line-height: 1.55; color: var(--text-mute); }
+            .lp-row { padding: 17px 0; gap: 14px; }
+            .lp-row-t b { font-size: 14px; }
+
+            /* --border-strong, not the hairline the rows use. This line is not
+               another row boundary, it is where "Two ways in" ends: the heading
+               governs the two destinations above it and nothing below it.
+               It is a flex column rather than a block so that the share of the
+               card's spare height it is handed reaches the install row inside
+               it: the help line beneath is fixed copy and must not stretch. */
+            .lp-panelfoot { display: flex; flex-direction: column; flex: 1 1 auto;
+                            margin-top: 6px; padding-top: 2px;
+                            border-top: 1px solid var(--border-strong); }
+            .lp-help { display: block; margin: 0; padding: 12px 0 2px;
+                       border-top: 1px solid var(--border);
+                       font-size: 12px; line-height: 1.55; color: var(--text-mute); }
+
+            .lp a.lp-ext { min-height: 32px; }
+        }
+
+        /* Inside the installed app there is nothing left to install. */
+        html[data-installed="1"] .lp-install,
+        html[data-installed="1"] .lp-installrow,
+        html[data-installed="1"] .lp-how { display: none; }
+        /* With the install row gone the panel's footer group holds one fixed
+           paragraph and has no growing row left to hand its share of the card's
+           height to, so the share opens as 98px of empty card under the help
+           line. The two destinations that remain take it instead, and the help
+           line goes back to sitting on the card's own bottom padding. */
+        html[data-installed="1"] .lp-panelfoot { flex: 0 0 auto; }
+        html[data-installed="1"] .lp a.lp-signin { background: var(--primary);
+                          border-color: var(--primary); color: #fff; font-weight: 600; }
+
+        @media (prefers-reduced-motion: reduce) {
+            .lp { animation: none; }
+        }
+    </style>
 </head>
 <body>
-<div class="aurora-bg"></div>
+<th:block th:replace="~{fragments/icons :: sprite}"></th:block>
 
-<div class="auth-wrap">
-    <div style="max-width:660px;text-align:center;animation:fade-up .5s cubic-bezier(.2,.7,.3,1)">
+<div class="lp">
+    <div class="lp-main">
 
-        <img src="/logo.png" alt="Jarurat Care Foundation" style="max-height:72px;margin-bottom:24px">
+        <header class="lp-hero">
+            <div class="lp-tile"><img src="/icons/icon-192.png" alt="" width="44" height="44"></div>
+            <p class="lp-eyebrow">Jarurat Care Foundation</p>
+            <h1 class="lp-h1">Jarurat Mail</h1>
+            <p class="lp-lede">
+                Your jarurat.care mail on every device you use, and the studio that
+                sends the foundation's campaigns.
+            </p>
 
-        <h1 style="font-size:clamp(2.1rem,6vw,3.2rem);font-weight:780;letter-spacing:-0.035em;margin:0 0 14px"
-            class="text-gradient">Campaign Studio</h1>
+            <div class="lp-cta">
+                <button type="button" class="btn lp-b lp-install" data-jm-install>
+                    <svg class="ic" aria-hidden="true"><use href="#i-install"/></svg>
+                    Install the app
+                </button>
+                <a class="btn lp-b lp-signin" href="/login">Sign in</a>
+            </div>
+            <p class="lp-note">It installs from the browser you already have. There is nothing to download.</p>
+        </header>
 
-        <p style="color:var(--text-dim);font-size:16.5px;line-height:1.65;margin:0 auto 32px;max-width:540px">
-            The sending platform behind Jarurat Care Foundation. Marketing campaigns,
-            transactional mail for the people team, and a shared subscriber base,
-            all on Amazon SES.
-        </p>
+        <section class="lp-how">
+            <h2 class="lp-h2">How it installs</h2>
+            <ol class="lp-steps">
+                <li>
+                    <span class="lp-stepic"><svg class="ic" aria-hidden="true"><use href="#i-install"/></svg></span>
+                    <span>
+                        <b>Tap Install</b>
+                        <span>On Android, Chrome and Edge the browser's own install prompt opens and does the rest.</span>
+                    </span>
+                </li>
+                <li>
+                    <span class="lp-stepic"><svg class="ic" aria-hidden="true"><use href="#i-share-ios"/></svg></span>
+                    <span>
+                        <b>On an iPhone, tap Share instead</b>
+                        <span>Safari has no install button. Open the Share sheet, scroll down, choose Add to Home Screen.</span>
+                    </span>
+                </li>
+                <li>
+                    <span class="lp-stepic"><svg class="ic" aria-hidden="true"><use href="#i-phone"/></svg></span>
+                    <span>
+                        <b>Open it from the home screen</b>
+                        <span>Full screen, no browser bar, sitting with your other apps.</span>
+                    </span>
+                </li>
+            </ol>
+        </section>
 
-        <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
-            <a href="/login" class="btn btn-primary" style="padding:12px 26px;font-size:14px">Sign in</a>
-            <a href="https://jarurat.care" class="btn" style="padding:12px 26px;font-size:14px">jarurat.care</a>
-        </div>
+        <aside class="lp-ways">
+            <div class="lp-panel">
+                <h2 class="lp-h2">Two ways in</h2>
+                <!-- Laptop only. It answers the question this panel otherwise
+                     raises, which section 12 of the spec is entirely about: two
+                     destinations, one address, one password, no second prompt. -->
+                <p class="lp-panelsub">Both open with the same jarurat.care address and password.</p>
+                <a class="lp-row" href="/login">
+                    <svg class="ic ic-lg" aria-hidden="true"><use href="#i-mail"/></svg>
+                    <span class="lp-row-t">
+                        <b>Mailbox</b>
+                        <span>Your jarurat.care address, read and answered on any screen.</span>
+                    </span>
+                    <svg class="ic ic-sm lp-chev" aria-hidden="true"><use href="#i-next"/></svg>
+                </a>
+                <a class="lp-row" href="/login?desktop=1">
+                    <svg class="ic ic-lg" aria-hidden="true"><use href="#i-campaign"/></svg>
+                    <span class="lp-row-t">
+                        <b>Campaign Studio</b>
+                        <span>Lists, campaigns, journeys and delivery logs. Built for a laptop.</span>
+                    </span>
+                    <svg class="ic ic-sm lp-chev" aria-hidden="true"><use href="#i-next"/></svg>
+                </a>
 
-        <div style="display:flex;gap:24px;justify-content:center;flex-wrap:wrap;margin-top:42px;
-                    font-size:12px;color:var(--text-mute)">
-            <span>50,000 emails / day</span>
-            <span>DKIM signed</span>
-            <span>Role based access</span>
-            <span>One-click unsubscribe</span>
-        </div>
+                <!-- Laptop only, and absent below 900px rather than hidden there:
+                     the hero button is the install call to action on a phone, and
+                     two controls doing one job on one screen is the ambiguity
+                     section 13 rules out. Both of them carry data-jm-install, so
+                     whichever one the width has left standing is the way back to
+                     the install card once the visitor has dismissed it. -->
+                <div class="lp-panelfoot">
+                    <button type="button" class="lp-row lp-installrow" data-jm-install>
+                        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-install"/></svg>
+                        <span class="lp-row-t">
+                            <b>Install on your phone</b>
+                            <span>Android and Chrome install it outright. On an iPhone, open Share, then Add to Home Screen.</span>
+                        </span>
+                        <svg class="ic ic-sm lp-chev" aria-hidden="true"><use href="#i-next"/></svg>
+                    </button>
+                    <p class="lp-help">
+                        No account yet, or a password that stopped working? Ask whoever
+                        set up your jarurat.care address at the foundation.
+                    </p>
+                </div>
+            </div>
+        </aside>
+
     </div>
+
+    <ul class="lp-facts">
+        <li>
+            <svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>
+            <b>50,000 emails a day</b><span>Sending capacity</span>
+        </li>
+        <li>
+            <svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg>
+            <b>DKIM signed</b><span>On every message that leaves</span>
+        </li>
+        <li>
+            <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg>
+            <b>Role based access</b><span>Each account gets only its own tools</span>
+        </li>
+        <li>
+            <svg class="ic" aria-hidden="true"><use href="#i-block"/></svg>
+            <b>One-click unsubscribe</b><span>Honoured straight from the mail client</span>
+        </li>
+    </ul>
+
+    <footer class="lp-foot">
+        <span>Jarurat Care Foundation</span>
+        <a class="lp-ext" href="https://jarurat.care" rel="noopener">
+            jarurat.care
+            <svg class="ic ic-sm" aria-hidden="true"><use href="#i-external"/></svg>
+        </a>
+    </footer>
 </div>
+
+<th:block th:replace="~{fragments/pwa :: script}"></th:block>
 </body>
 </html>

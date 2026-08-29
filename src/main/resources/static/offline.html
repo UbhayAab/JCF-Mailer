@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#141414">
+    <title>No connection - Jarurat Mail</title>
+    <link rel="icon" href="/logo.png">
+    <!--
+      This card is served by sw.js from the cache when a navigation fails, so it
+      cannot fetch anything: no stylesheet, no sprite, no image. Every token below
+      is a literal copy of docs/UI-SPEC.md sections 2 to 7, and the globe is the
+      i-globe symbol from templates/fragments/icons.html pasted in by hand, because
+      a Thymeleaf fragment cannot reach a static file.
+    -->
+    <style>
+        :root{
+            color-scheme:dark;
+            --bg:#141414; --panel:#202020; --panel-2:#252525; --panel-3:#2c2c2c; --panel-4:#343434;
+            --border:rgba(255,255,255,.075); --border-strong:rgba(255,255,255,.14);
+            --text:#ededed; --text-dim:#b9b9b9; --text-mute:#949494;
+            --primary:#2f6fed; --primary-hover:#3a7bf5;
+            --e1:0 1px 2px rgba(0,0,0,.32);
+            --t-fast:120ms cubic-bezier(.2,.7,.3,1);
+            --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+        }
+        *{box-sizing:border-box}
+        html,body{height:100%}
+        body{margin:0;background:var(--bg);color:var(--text);font:13.5px/1.5 var(--sans);
+             display:grid;place-items:center;
+             padding:24px calc(20px + env(safe-area-inset-right, 0px))
+                     calc(24px + env(safe-area-inset-bottom, 0px))
+                     calc(20px + env(safe-area-inset-left, 0px))}
+        .card{width:100%;max-width:360px;text-align:center}
+        /* Elevation is a border plus a shadow, never a lighter fill on its own. */
+        .tile{width:72px;height:72px;margin:0 auto 20px;border-radius:16px;
+              background:var(--panel);border:1px solid var(--border-strong);
+              box-shadow:var(--e1);display:grid;place-items:center}
+        .ic{width:34px;height:34px;fill:none;stroke:currentColor;stroke-width:1.5;
+            stroke-linecap:round;stroke-linejoin:round;color:var(--text-mute)}
+        h1{font-size:20px;line-height:1.25;font-weight:640;letter-spacing:-.02em;margin:0 0 8px}
+        p{margin:0;color:var(--text-dim);font-size:13.5px;line-height:1.5}
+        #status{margin-top:12px;color:var(--text-mute);font-size:12.5px;line-height:1.45}
+        .acts{display:flex;flex-direction:column;gap:8px;margin-top:24px}
+        .btn{font:inherit;font-size:13.5px;font-weight:600;cursor:pointer;
+             min-height:44px;padding:0 16px;border-radius:8px;text-decoration:none;
+             display:inline-flex;align-items:center;justify-content:center;
+             border:1px solid var(--border-strong);background:var(--panel-3);color:var(--text);
+             -webkit-tap-highlight-color:transparent;touch-action:manipulation;
+             transition:background var(--t-fast),border-color var(--t-fast)}
+        .btn:hover{background:var(--panel-4)}
+        .btn:active{background:var(--panel-2)}
+        .btn.pri{background:var(--primary);border-color:var(--primary);color:#fff}
+        .btn.pri:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
+        .btn.pri:active{background:var(--primary)}
+        .btn[disabled]{opacity:.6;cursor:default}
+        .btn:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+        @media(prefers-reduced-motion:reduce){.btn{transition:none}}
+    </style>
+</head>
+<body>
+<div class="card">
+    <div class="tile">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="8.6"/>
+            <path d="M3.4 12h17.2"/>
+            <ellipse cx="12" cy="12" rx="3.9" ry="8.6"/>
+        </svg>
+    </div>
+    <h1>No connection</h1>
+    <p>Jarurat Mail reads every message from the server as you open it, so there is
+        nothing it can show you here. Your mailbox is untouched and will be exactly
+        as you left it.</p>
+    <p id="status" role="status"></p>
+    <div class="acts">
+        <button class="btn pri" type="button" id="retry">Try again</button>
+        <a class="btn" href="/mail">Go to the inbox</a>
+    </div>
+</div>
+<script>
+    (function () {
+        'use strict';
+        var btn = document.getElementById('retry');
+        var status = document.getElementById('status');
+
+        /* Worth saying out loud, because the two cases need different things from
+           the reader. navigator.onLine only knows whether an interface is up, so a
+           true here with this page on screen means the phone is on a network that
+           did not carry the request: hotel wifi, a captive portal, or our own
+           server being down. Telling someone to check their wifi when their wifi
+           is fine is how a product loses their trust. */
+        function paint() {
+            status.textContent = navigator.onLine
+                ? 'This device has a connection, so the request never reached the server.'
+                : 'This device has no network connection.';
+        }
+
+        function retry() {
+            btn.disabled = true;
+            btn.textContent = 'Reconnecting...';
+            // The offline card is served for whichever address failed, so the
+            // document URL is still that address and a reload retries it rather
+            // than sending everyone to the same page.
+            location.reload();
+        }
+
+        /* The `online` event only fires on a transition, and measuring this page
+           in Chromium with the network genuinely cut showed navigator.onLine
+           still reading true, so for a captive portal or a server outage that
+           event never arrives at all. Coming back to the app is the other moment
+           a person expects it to have recovered, so probe once then. HEAD is
+           deliberate: sw.js returns early for anything that is not a GET, so the
+           probe cannot be answered out of the cache it is trying to test. */
+        var probing = false;
+        function probe() {
+            if (probing || document.visibilityState !== 'visible') return;
+            probing = true;
+            fetch(location.href, { method: 'HEAD', cache: 'no-store' })
+                .then(retry)
+                .catch(function () { probing = false; });
+        }
+
+        btn.addEventListener('click', retry);
+        window.addEventListener('offline', paint);
+        window.addEventListener('online', function () { paint(); retry(); });
+        document.addEventListener('visibilitychange', probe);
+        paint();
+    })();
+</script>
+</body>
+</html>

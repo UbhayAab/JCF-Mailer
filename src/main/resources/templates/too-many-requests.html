@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Too many attempts | Jarurat Mail</title>
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="icon" href="/logo.png">
+
+    <style>
+        /* ==================================================================
+           The 429 on the login form. One centred card, the same ground and
+           the same card edge as the sign-in page.
+
+           Every colour, the button and the .ic icon sizing come from
+           static/css/style.css, so this page cannot drift away from the one
+           it is shown instead of. Only the shapes that exist nowhere else
+           are defined here, and there are three of them.
+
+           No install card and no PWA head block on purpose. Section 15 of the
+           UI specification says a promotion never outranks a surface the
+           person deliberately opened, and somebody who has just been refused
+           did not open this one at all.
+           ================================================================== */
+
+        .tm { min-height: 100vh; min-height: 100dvh; display: flex;
+              padding: 24px 20px; background: var(--bg); }
+        /* margin:auto rather than align-items:center, for the same reason the
+           sign-in card uses it: a centred flex item whose content outgrows the
+           viewport has its top cut off and unreachable, and an auto margin
+           gives the same centring and then yields. */
+        .tm-card { margin: auto; width: 100%; max-width: 420px; padding: 24px 20px 20px;
+                   background: var(--panel); border: 1px solid var(--border);
+                   border-radius: var(--r-md, 12px); box-shadow: var(--e3, 0 12px 34px rgba(0, 0, 0, .50)); }
+
+        /* The one place on the page that carries colour. It is the warning
+           token rather than the accent, because this is a state and not an
+           action, and section 13.4 keeps the accent for the thing to press. */
+        .tm-mark { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center;
+                   background: var(--tint-warning); color: var(--warning-fg);
+                   border: 1px solid rgba(217, 158, 11, .32); margin-bottom: 18px; }
+        .tm-mark .ic { width: 22px; height: 22px; }
+
+        .tm-card h1 { margin: 0 0 8px; font-size: 20px; font-weight: 640;
+                      letter-spacing: -.02em; color: var(--text); }
+        .tm-card p { margin: 0 0 14px; font-size: 13.5px; line-height: 1.6; color: var(--text-mute); }
+        .tm-card p.tm-lead { color: var(--text-dim); }
+        .tm-card .btn { width: 100%; min-height: 40px; margin-top: 4px; text-decoration: none; }
+    </style>
+</head>
+<body>
+<th:block th:replace="~{fragments/icons :: sprite}"></th:block>
+
+<main class="tm">
+    <div class="tm-card">
+        <span class="tm-mark"><svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg></span>
+
+        <h1>Too many attempts</h1>
+        <p class="tm-lead">
+            This connection has tried to sign in too many times in a row, so sign-ins from
+            it are paused for a few minutes.
+        </p>
+        <p>
+            Try again in about <span th:text="${waitMinutes}">15</span> minutes. If you are
+            on the foundation office network you may be sharing this pause with somebody
+            else on it, and waiting is still the fix.
+        </p>
+        <p>
+            Nothing has happened to your account or your mailbox, and your password has not
+            been changed. Mail on your phone and in any other mail app keeps working.
+        </p>
+
+        <a class="btn btn-primary" href="/login">Back to sign in</a>
+    </div>
+</main>
+</body>
+</html>

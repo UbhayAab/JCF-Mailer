@@ -2,6 +2,7 @@ package com.jarurat.mailer.services;
 
 import com.jarurat.mailer.models.AuditLog;
 import com.jarurat.mailer.repositories.AuditLogRepository;
+import com.jarurat.mailer.security.ClientIp;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -27,11 +28,16 @@ public class AuditService {
         return auth == null || auth.getName() == null ? "system" : auth.getName();
     }
 
+    /**
+     * This used to read the first element of {@code X-Forwarded-For}, which is the
+     * one the caller writes, so the source address on every audit row was a value
+     * the audited party chose. An audit log that records what the subject asked it
+     * to record is worse than one with no address column at all, because it will be
+     * believed. {@link ClientIp} carries the reasoning and is the only reader now.
+     */
     private String currentIp() {
         if (!(RequestContextHolder.getRequestAttributes() instanceof ServletRequestAttributes attrs)) return null;
-        HttpServletRequest request = attrs.getRequest();
-        String forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded != null && !forwarded.isBlank()) return forwarded.split(",")[0].trim();
-        return request.getRemoteAddr();
+        String ip = ClientIp.of(attrs.getRequest());
+        return ip.isEmpty() ? null : ip;
     }
 }

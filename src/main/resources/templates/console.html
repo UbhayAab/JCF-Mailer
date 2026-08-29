@@ -5,21 +5,46 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>JCF Campaign Studio</title>
     <link rel="stylesheet" href="/css/style.css">
+    <!-- One declaration that belongs in style.css beside the rest of the KPI block,
+         and sits here only because this pass does not own that file. The .kpi::before
+         rule there paints every tile stripe --primary, so once the semantic classes
+         were laid on top the overview row carried five hues at once with nothing
+         saying which two of them meant anything. UI-SPEC 13.4 rules that out. The
+         default edge becomes a plain border; .kpi.warn and .kpi.danger still win on
+         specificity, which is how Unsubscribed and Bounced keep the only colour that
+         is load bearing. Delete this block the moment .kpi::before in style.css says
+         the same thing. -->
+    <style>.kpi::before { background: var(--border-strong); }</style>
     <link rel="icon" href="/logo.png">
+    <th:block th:replace="~{fragments/pwa :: head}"></th:block>
 </head>
 <body>
+<th:block th:replace="~{fragments/icons :: sprite}"></th:block>
 <div class="aurora-bg"></div>
+
+<!-- Below 900px the rail is a slide-in drawer, so the page needs chrome of its
+     own to open it from. This markup is the contract style.css is written
+     against: the button is #navToggle, the rail is #navDrawer, the scrim is its
+     sibling, and console.js only ever toggles drawer-open on <body>. -->
+<header class="mobile-topbar">
+    <button class="icon-btn" type="button" id="navToggle"
+            aria-label="Open navigation" aria-controls="navDrawer" aria-expanded="false">
+        <svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg>
+    </button>
+    <span class="brand-mark" aria-hidden="true">JC</span>
+    <span class="mobile-title" id="mobileTitle">Overview</span>
+</header>
 
 <div class="app">
     <!-- ============================ SIDEBAR ============================ -->
-    <aside class="sidebar">
+    <aside class="sidebar" id="navDrawer" aria-label="Console sections">
         <div class="brand">
             <div class="brand-mark">JC</div>
             <div class="brand-text">Campaign Studio<small>Jarurat Care Foundation</small></div>
         </div>
 
-        <div class="nav-item active" data-view="overview">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M3 13h6V3H3zM15 21h6V11h-6zM3 21h6v-4H3zM15 7h6V3h-6z"/></svg>
+        <div class="nav-item active" data-view="overview" role="button" tabindex="0" aria-current="page">
+            <svg class="ic" aria-hidden="true"><use href="#i-dashboard"/></svg>
             <span class="label">Overview</span>
         </div>
 
@@ -27,83 +52,89 @@
              data-view switches. The click handler in console.js skips anchors. -->
         <div class="nav-group" data-group="mailbox">Mailbox</div>
         <a class="nav-item" href="/mail" data-perm="MAIL_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 4h16v16H4z"/><path d="M4 8h16M9 12h7M9 16h7"/></svg>
+            <svg class="ic" aria-hidden="true"><use href="#i-inbox"/></svg>
             <span class="label">Inbox</span>
         </a>
         <a class="nav-item" href="/mail#compose" data-perm="MAIL_SEND">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+            <svg class="ic" aria-hidden="true"><use href="#i-compose"/></svg>
             <span class="label">Compose</span>
         </a>
-        <div class="nav-item" data-view="mailboxes" data-perm="MAILBOX_MANAGE">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11h18v9H3z"/><path d="M3 11 6 5h12l3 6"/><path d="M9 11v3h6v-3"/></svg>
-            <span class="label">Mailboxes</span><span class="nav-badge" id="badgeMailboxes">0</span>
+        <div class="nav-item" data-view="mailboxes" data-perm="MAILBOX_MANAGE" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-mailboxes"/></svg>
+            <!-- Every rail badge starts empty and hidden. A count of zero was being
+                 printed here until its view was first opened, which put a 0 next to
+                 Mailboxes and Journeys on a screen where the absence of the badge
+                 already says it. setNavBadge in console.js is the only writer, and it
+                 re-hides the badge on any zero, the same rule mail.js uses for the
+                 unread tab. -->
+            <span class="label">Mailboxes</span><span class="nav-badge" id="badgeMailboxes" hidden></span>
         </div>
-        <div class="nav-item" data-view="domains" data-perm="MAILBOX_MANAGE">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 3 2.5 15 0 18M12 3c-2.5 3-2.5 15 0 18"/></svg>
+        <div class="nav-item" data-view="domains" data-perm="MAILBOX_MANAGE" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-globe"/></svg>
             <span class="label">Domains</span>
         </div>
 
         <div class="nav-group" data-group="marketing">Marketing</div>
-        <div class="nav-item" data-view="campaigns" data-perm="CAMPAIGNS_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M3 5h18v14H3z"/><path d="m3 6 9 7 9-7"/></svg>
-            <span class="label">Campaigns</span><span class="nav-badge" id="badgeCampaigns">0</span>
+        <div class="nav-item" data-view="campaigns" data-perm="CAMPAIGNS_READ" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-campaign"/></svg>
+            <span class="label">Campaigns</span><span class="nav-badge" id="badgeCampaigns" hidden></span>
         </div>
-        <div class="nav-item" data-view="composer" data-perm="CAMPAIGNS_WRITE">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+        <div class="nav-item" data-view="composer" data-perm="CAMPAIGNS_WRITE" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-compose"/></svg>
             <span class="label">Composer</span>
         </div>
-        <div class="nav-item" data-view="journeys" data-perm="CAMPAIGNS_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.4"/><circle cx="18" cy="12" r="2.4"/><circle cx="6" cy="19" r="2.4"/><path d="M8.4 5H13a3 3 0 0 1 3 3v1.6M15.6 12H11a3 3 0 0 0-3 3v2"/></svg>
-            <span class="label">Journeys</span><span class="nav-badge" id="badgeJourneys">0</span>
+        <div class="nav-item" data-view="journeys" data-perm="CAMPAIGNS_READ" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-journey"/></svg>
+            <span class="label">Journeys</span><span class="nav-badge" id="badgeJourneys" hidden></span>
         </div>
 
         <div class="nav-group" data-group="audience">Audience</div>
-        <div class="nav-item" data-view="lists" data-perm="LISTS_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
-            <span class="label">Lists</span><span class="nav-badge" id="badgeLists">0</span>
+        <div class="nav-item" data-view="lists" data-perm="LISTS_READ" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-list"/></svg>
+            <span class="label">Lists</span><span class="nav-badge" id="badgeLists" hidden></span>
         </div>
-        <div class="nav-item" data-view="subscribers" data-perm="SUBSCRIBERS_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/></svg>
+        <div class="nav-item" data-view="subscribers" data-perm="SUBSCRIBERS_READ" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg>
             <span class="label">Subscribers</span>
         </div>
-        <div class="nav-item" data-view="suppression" data-perm="SUPPRESSION_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/></svg>
-            <span class="label">Suppression</span><span class="nav-badge" id="badgeSuppression">0</span>
+        <div class="nav-item" data-view="suppression" data-perm="SUPPRESSION_READ" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-block"/></svg>
+            <span class="label">Suppression</span><span class="nav-badge" id="badgeSuppression" hidden></span>
         </div>
-        <div class="nav-item" data-view="verify" data-perm="VERIFICATION_RUN">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M12 3l7 3v6c0 4.4-3 8.2-7 9-4-.8-7-4.6-7-9V6z"/></svg>
+        <div class="nav-item" data-view="verify" data-perm="VERIFICATION_RUN" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-verify"/></svg>
             <span class="label">Verify list</span>
         </div>
 
         <div class="nav-group" data-group="ops">Operations</div>
-        <div class="nav-item" data-view="analytics" data-perm="ANALYTICS_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 14 3-4 3 3 5-7"/></svg>
+        <div class="nav-item" data-view="analytics" data-perm="ANALYTICS_READ" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-analytics"/></svg>
             <span class="label">Analytics</span>
         </div>
-        <div class="nav-item" data-view="messagelog" data-perm="MESSAGELOG_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v14H4z"/><path d="M4 9h16M8 13h8M8 16h5"/></svg>
+        <div class="nav-item" data-view="messagelog" data-perm="MESSAGELOG_READ" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-log"/></svg>
             <span class="label">Message log</span>
         </div>
-        <div class="nav-item" data-view="templates" data-perm="TEMPLATES_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 4h16v6H4zM4 14h7v6H4zM15 14h5v6h-5z"/></svg>
+        <div class="nav-item" data-view="templates" data-perm="TEMPLATES_READ" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-template"/></svg>
             <span class="label">Templates</span>
         </div>
-        <div class="nav-item" data-view="transactional" data-perm="TRANSACTIONAL_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m3 11 18-8-8 18-2-7-8-3Z"/></svg>
+        <div class="nav-item" data-view="transactional" data-perm="TRANSACTIONAL_READ" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-send"/></svg>
             <span class="label">Transactional</span>
         </div>
 
         <div class="nav-group" data-group="admin">Administration</div>
-        <div class="nav-item" data-view="team" data-perm="TEAM_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <div class="nav-item" data-view="team" data-perm="TEAM_READ" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-users"/></svg>
             <span class="label">Team &amp; roles</span>
         </div>
-        <div class="nav-item" data-view="apikeys" data-perm="APIKEYS_MANAGE">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 8.8-8.8M17 6l2.5 2.5M14 9l2.5 2.5"/></svg>
+        <div class="nav-item" data-view="apikeys" data-perm="APIKEYS_MANAGE" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-key"/></svg>
             <span class="label">API keys</span>
         </div>
-        <div class="nav-item" data-view="audit" data-perm="AUDIT_READ">
-            <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 15h6M9 11h3"/></svg>
+        <div class="nav-item" data-view="audit" data-perm="AUDIT_READ" role="button" tabindex="0">
+            <svg class="ic" aria-hidden="true"><use href="#i-audit"/></svg>
             <span class="label">Audit log</span>
         </div>
 
@@ -127,6 +158,10 @@
             </form>
         </div>
     </aside>
+
+    <!-- Covers the page while the drawer is out. Clicking it closes the drawer,
+         which is the gesture people try before they look for a close button. -->
+    <div class="scrim" id="navScrim" aria-hidden="true"></div>
 
     <!-- ============================== MAIN ============================== -->
     <main class="main">
@@ -604,7 +639,7 @@
                     <div class="grid grid-kpi" id="verifyKpis"></div>
                     <div id="verifyProgress" style="display:none;margin-top:14px">
                         <div style="height:7px;border-radius:99px;background:var(--border);overflow:hidden">
-                            <div id="verifyBar" style="height:100%;width:0;background:var(--accent);transition:width .3s"></div>
+                            <div id="verifyBar" style="height:100%;width:0;background:var(--primary);transition:width .3s"></div>
                         </div>
                         <div class="sub" id="verifyProgressText" style="margin-top:7px"></div>
                     </div>
@@ -1339,5 +1374,6 @@
 <script src="/js/charts.js"></script>
 <script src="/js/console.js"></script>
 <script src="/js/journey.js"></script>
+<th:block th:replace="~{fragments/pwa :: script}"></th:block>
 </body>
 </html>

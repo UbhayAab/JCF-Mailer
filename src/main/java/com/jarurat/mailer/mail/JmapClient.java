@@ -13,6 +13,7 @@ import javax.net.ssl.SSLException;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509ExtendedTrustManager;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.net.URI;
@@ -32,6 +33,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 
 /**
  * Transport for Stalwart's JMAP endpoint. Knows about sessions, authentication,
@@ -403,6 +405,53 @@ public class JmapClient {
     // ------------------------------------------------------------------
     // Blobs
     // ------------------------------------------------------------------
+
+    /** What the upload endpoint hands back. Enough for a message to reference the bytes. */
+    public record Blob(String blobId, String type, long size) {}
+
+    /**
+     * Streams one file into the account's blob store and returns the id a message
+     * can point at. This is the first half of sending an attachment; the second is
+     * naming that blob in the Email/set that follows.
+     *
+     * The bytes arrive as a supplier of streams and never as a byte[], and that is
+     * the whole reason this method has the signature it has. A 25MB file held as an
+     * array, then handed to a JSON layer that base64s it into a String, is roughly
+     * 60MB of live heap for one send on a box with two vCPUs and a small heap, so
+     * three people attaching a video at the same time would be an OutOfMemoryError
+     * rather than a slow send. Spring writes every uploaded part straight to a temp
+     * file, so the stream this reads is a file on disk and no more than a socket
+     * buffer of it is in memory at any moment.
+     *
+     * fromPublisher wrapping ofInputStream, rather than ofInputStream on its own,
+     * because ofInputStream alone reports an unknown length and the request goes out
+     * chunked. Giving the length back makes it an ordinary Content-Length upload,
+     * which is what Stalwart's upload endpoint expects. The supplier rather than a
+     * stream is what lets HttpClient re-open the source if it has to send again.
+     */
+    public Blob upload(String user, String type, long size, Supplier<InputStream> body) {
+        MailSession s = session(user);
+        String url = s.uploadTemplate().replace("{accountId}", segment(s.accountId()));
+        String contentType = type == null || type.isBlank() ? "application/octet-stream" : type;
+
+        HttpResponse<String> res = exchange(
+                authorised(user, URI.create(url))
+                        .header("Content-Type", contentType)
+                        .POST(HttpRequest.BodyPublishers.fromPublisher(
+                                HttpRequest.BodyPublishers.ofInputStream(body), size))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+
+        JsonNode root = parse(res.body());
+        String blobId = text(root, "blobId");
+        if (blobId == null || blobId.isBlank()) {
+            throw new MailException(MailException.Kind.PROTOCOL,
+                    "Mail server took the upload but named no blob to reference it by");
+        }
+        String served = text(root, "type");
+        return new Blob(blobId, served == null || served.isBlank() ? contentType : served,
+                root.path("size").asLong(size));
+    }
 
     /** Fetches attachment bytes. Only called when a user actually clicks a file. */
     public byte[] download(String user, String blobId, String name, String type) {

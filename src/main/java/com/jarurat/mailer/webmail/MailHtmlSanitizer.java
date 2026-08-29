@@ -145,12 +145,18 @@ public final class MailHtmlSanitizer {
      */
     public static Result toReaderDocument(String html, String text, boolean allowRemoteImages, String theme) {
         Result body;
+        boolean senderAuthoredHtml;
         if (html != null && !html.isBlank()) {
             body = sanitize(html, allowRemoteImages);
+            senderAuthoredHtml = true;
         } else {
             body = new Result(plainTextToHtml(text), 0);
+            senderAuthoredHtml = false;
         }
-        return new Result(wrapDocument(body.html(), allowRemoteImages, theme), body.blockedImages());
+        // The theme the app asks for is only honoured for a body we generated
+        // ourselves. See wrapDocument for why sender HTML never gets a dark ground.
+        String effective = senderAuthoredHtml ? "light" : theme;
+        return new Result(wrapDocument(body.html(), allowRemoteImages, effective), body.blockedImages());
     }
 
     /** Sanitises a fragment. The result is a fragment, not a document. */
@@ -766,6 +772,28 @@ public final class MailHtmlSanitizer {
      * Wraps a sanitised fragment in a standalone document for the iframe's srcdoc.
      * The CSP here is layer 3: even a defect in the tokeniser above cannot make the
      * frame fetch a tracking pixel while images are off, because default-src is 'none'.
+     *
+     * <h3>Why sender HTML is always rendered on a light ground</h3>
+     *
+     * A message written by somebody else carries its own colours, in inline styles,
+     * in {@code bgcolor} attributes and in its own stylesheet, and this class
+     * deliberately preserves them: stripping a sender's colours mangles every
+     * newsletter and every signature. Those colours are chosen against white,
+     * because that is what mail clients have always shown. Almost every HTML mail in
+     * existence sets something like {@code color:#333} on its body text and sets no
+     * background at all.
+     *
+     * Painting that on a dark ground produces near-black text on near-black, which
+     * is the single most common way a dark-themed mail client becomes unusable, and
+     * it happened here: the reader showed empty messages that were not empty. There
+     * is no safe repair from this side. Overriding the sender's colour breaks the
+     * many messages that set a background too, and inverting the document wrecks
+     * logos and screenshots.
+     *
+     * So the ground follows who wrote the body. Sender HTML gets white, the way
+     * every serious client renders it. A plain text body is turned into markup by
+     * this class, carries no colours of its own, and therefore follows the app's
+     * theme and looks native in the dark shell.
      */
     static String wrapDocument(String fragment, boolean allowRemoteImages, String theme) {
         String imgSrc = allowRemoteImages ? "data: https: http:" : "data:";
@@ -783,7 +811,14 @@ public final class MailHtmlSanitizer {
                 + "script-src 'none'; object-src 'none'; frame-src 'none'; "
                 + "form-action 'none'; base-uri 'none'\">"
                 + "<meta name=\"referrer\" content=\"no-referrer\">"
-                + "<style>:root{" + base + "}" + autoBlock
+                // color-scheme is set explicitly and is not decoration. Without it the
+                // user agent paints its own defaults from the operating system setting:
+                // scrollbars, text selection, form controls and the autofill wash inside
+                // this frame all turn dark on a machine set to dark, on top of a white
+                // letter. No amount of colour token work reaches those, because they are
+                // not styled by the page at all.
+                + "<style>:root{color-scheme:" + (dark ? "dark" : auto ? "light dark" : "light") + ";"
+                + base + "}" + autoBlock
                 + "html,body{margin:0;padding:0}"
                 + "body{background:var(--b);color:var(--t);"
                 + "font:14.5px/1.68 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;"
@@ -804,8 +839,18 @@ public final class MailHtmlSanitizer {
         return "--b:#ffffff;--t:#14212a;--l:#00697f;--m:#7b8d99;--d:#dde5e8;--s:#eef2f3;";
     }
 
+    /**
+     * Charcoal, matching {@code --panel} in the reader pane that this frame sits in,
+     * so the plain text body and its container are one surface with no visible seam.
+     *
+     * These were a blue slate ({@code #121c22}, {@code #18242b}, {@code #22323b}) and
+     * that is the blue the mailbox kept coming back to after three separate passes
+     * declared it removed. It survived because a sandboxed frame is a separate
+     * document that inherits nothing, so no amount of work on the parent's tokens
+     * reaches these literals. See UI-SPEC section 2: flat charcoal, never navy.
+     */
     private static String darkVars() {
-        return "--b:#121c22;--t:#e4ecf0;--l:#5fc0da;--m:#72858f;--d:#22323b;--s:#18242b;";
+        return "--b:#202020;--t:#ededed;--l:#7aa8ff;--m:#949494;--d:#343434;--s:#252525;";
     }
 
     // ------------------------------------------------------------------ escaping

@@ -15,9 +15,17 @@ public class AppUserDetailsService implements UserDetailsService {
         this.userRepository = userRepository;
     }
 
+    /**
+     * The lookup key comes from LoginAddress rather than from a trim and a lower case
+     * written out here, so this file, MailboxAuthenticationProvider and the counter in
+     * LoginRateLimiter cannot disagree about what an address is. They did, and the
+     * disagreement was a way past the limiter. The default-locale toLowerCase this
+     * used to call was a second, quieter version of the same fault: under a Turkish
+     * locale it folds "I" to a dotless i and looks up an address nobody typed.
+     */
     @Override
     public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
-        return userRepository.findByEmail(email.trim().toLowerCase())
+        return userRepository.findByEmail(LoginAddress.canonical(email))
                 .map(AppUserDetails::new)
                 .orElseThrow(() -> new UsernameNotFoundException("No account for " + email));
     }

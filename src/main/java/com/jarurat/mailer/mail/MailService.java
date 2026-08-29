@@ -71,15 +71,39 @@ public class MailService {
     private final SesSender ses;
     private final int maxPageSize;
     private final int maxBodyBytes;
+    private final long maxAttachmentBytes;
 
     public MailService(JmapClient client,
                        SesSender ses,
                        @Value("${jarurat.mail.max-page-size:100}") int maxPageSize,
-                       @Value("${jarurat.mail.max-body-bytes:1000000}") int maxBodyBytes) {
+                       @Value("${jarurat.mail.max-body-bytes:1000000}") int maxBodyBytes,
+                       @Value("${jarurat.mail.max-attachment-bytes:17825792}") long maxAttachmentBytes) {
         this.client = client;
         this.ses = ses;
         this.maxPageSize = Math.max(1, maxPageSize);
         this.maxBodyBytes = Math.max(4096, maxBodyBytes);
+        this.maxAttachmentBytes = maxAttachmentBytes > 0 ? maxAttachmentBytes : 17_825_792L;
+    }
+
+    /**
+     * How many raw bytes of attachment one message may carry, added up across every
+     * file on it. Deliberately smaller than the upload limit, and the arithmetic is
+     * the reason rather than caution.
+     *
+     * A MIME attachment travels base64 encoded, which is four bytes out for every
+     * three in plus a CRLF every 76 characters: about 1.37 times its size on disk.
+     * The limit almost every receiving server enforces is 25MB and it is enforced on
+     * the encoded message, so the default here of 17MiB leaves at 24.4MB and just
+     * fits, with the rest of that 25MB left for the body and the headers. The 25MB
+     * the upload path allows would leave as 34MB and be refused by the far end after
+     * we had already accepted it, spent the sender's minutes on it and filed a copy
+     * in Sent. Refusing before anything is uploaded is the same answer, earlier.
+     */
+    public long maxAttachmentBytes() { return maxAttachmentBytes; }
+
+    /** The size the same bytes will have once base64 encoded into a MIME message. */
+    public static long encodedSize(long rawBytes) {
+        return Math.round(rawBytes * 1.37d);
     }
 
     // ------------------------------------------------------------------
@@ -347,6 +371,22 @@ public class MailService {
      */
     public String send(String user, List<String> to, List<String> cc, String subject,
                        String htmlBody, String textBody) {
+        return send(user, to, cc, subject, htmlBody, textBody, List.of());
+    }
+
+    /**
+     * The same send, carrying files.
+     *
+     * Each Attachment must already name a blob this account owns, which is what
+     * JmapClient.upload returns. Nothing here reads bytes: the message references
+     * blobs the mail server is already holding, so a 20MB attachment crosses this
+     * process once, on its way to the blob store, and never again.
+     *
+     * The five argument overload above is the whole of the previous contract and
+     * still exists for every caller that has nothing to attach.
+     */
+    public String send(String user, List<String> to, List<String> cc, String subject,
+                       String htmlBody, String textBody, List<Attachment> attachments) {
         List<String> recipients = cleanAddresses(to);
         List<String> copies = cleanAddresses(cc);
         if (recipients.isEmpty() && copies.isEmpty()) {
@@ -384,17 +424,52 @@ public class MailService {
         draft.put("subject", subject == null ? "" : subject);
 
         ObjectNode values = client.newObject();
+        ObjectNode body = client.newObject();
         if (hasHtml) {
-            ObjectNode structure = draft.putObject("bodyStructure");
-            structure.put("type", "multipart/alternative");
-            ArrayNode parts = structure.putArray("subParts");
+            body.put("type", "multipart/alternative");
+            ArrayNode parts = body.putArray("subParts");
             parts.addObject().put("partId", "t").put("type", "text/plain");
             parts.addObject().put("partId", "h").put("type", "text/html");
             values.putObject("t").put("value", text);
             values.putObject("h").put("value", htmlBody);
         } else {
-            draft.putObject("bodyStructure").put("partId", "t").put("type", "text/plain");
+            body.put("partId", "t").put("type", "text/plain");
             values.putObject("t").put("value", text);
+        }
+
+        List<Attachment> files = attachments == null ? List.of() : attachments;
+        if (files.isEmpty()) {
+            draft.set("bodyStructure", body);
+        } else {
+            // multipart/mixed wrapping the body part and then the files, which is the
+            // structure every mail client has produced for thirty years and the only
+            // one that keeps a plain text alternative next to the HTML rather than
+            // demoting it to a sibling of the attachments.
+            //
+            // bodyStructure and the textBody/htmlBody/attachments shorthand are two
+            // ways to say the same thing and JMAP forbids sending both, so building
+            // the tree by hand here is not a longer way of doing something simpler.
+            ObjectNode mixed = draft.putObject("bodyStructure");
+            mixed.put("type", "multipart/mixed");
+            ArrayNode parts = mixed.putArray("subParts");
+            parts.add(body);
+            for (Attachment file : files) {
+                if (file == null || file.blobId() == null || file.blobId().isBlank()) {
+                    throw new MailException(MailException.Kind.PROTOCOL,
+                            "An attachment reached the send with no uploaded blob behind it");
+                }
+                ObjectNode part = parts.addObject();
+                part.put("blobId", file.blobId());
+                part.put("type", file.type() == null || file.type().isBlank()
+                        ? "application/octet-stream" : file.type());
+                // safeName and not the raw name: this ends up as a MIME filename
+                // parameter on the recipient's side, and the same quoting and path
+                // separator problems apply there as on our own download header.
+                part.put("name", file.safeName());
+                part.put("disposition", "attachment");
+                // size is deliberately absent. RFC 8621 marks it server-set, and
+                // sending it makes Stalwart reject the whole Email/set as invalid.
+            }
         }
         draft.set("bodyValues", values);
 

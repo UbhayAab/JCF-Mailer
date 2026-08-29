@@ -1,5 +1,6 @@
 package com.jarurat.mailer.otp;
 
+import com.jarurat.mailer.security.ClientIp;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -203,12 +204,17 @@ public class OtpApi {
         return Objects.toString(request.getAttribute("apiKeyName"), "unknown");
     }
 
-    /** nginx terminates TLS, so the socket address is always its loopback address. */
+    /**
+     * nginx terminates TLS, so the socket address is always its loopback address.
+     *
+     * This used to take the first element of {@code X-Forwarded-For}, which is the
+     * element the caller supplies, and it feeds the per-IP burst limit in
+     * {@code OtpService}. So the limit could be rotated away by anyone who set the
+     * header. {@link ClientIp} explains why the header is not readable here at all
+     * and what replaced it.
+     */
     private static String clientIp(HttpServletRequest request) {
-        String forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded == null || forwarded.isBlank()) return request.getRemoteAddr();
-        int comma = forwarded.indexOf(',');
-        return (comma > 0 ? forwarded.substring(0, comma) : forwarded).trim();
+        return ClientIp.of(request);
     }
 
     private static String iso(LocalDateTime when) {

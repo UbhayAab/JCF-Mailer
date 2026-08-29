@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<!--
+  The icon system.
+
+  One <symbol> per icon, defined once per document, referenced with
+  <svg class="ic"><use href="#i-name"/></svg>. Same-document <use> is the only
+  form that works everywhere: an external sprite file needs a network fetch that
+  Safari refuses cross-document and that our own Content-Security-Policy would
+  have to widen for. Inlining costs about 9KB once and nothing thereafter.
+
+  Every symbol is drawn on a 24x24 grid with no fill and stroke: currentColor.
+  The stroke width, linecap and linejoin are set once on .ic in CSS rather than
+  per symbol, so one rule retunes the whole set. Geometry is inset far enough
+  that a 1.75 stroke never clips at the box edge.
+
+  This replaces the text glyphs the mailbox used as icons: an envelope
+  character, a pencil, a diamond and a padlock. Those are font characters, so
+  they render as the operating system's emoji, which is why the padlock came
+  out orange on Windows and would come out grey on a Mac and as a missing
+  glyph box on a server with no emoji font. An icon has to be a shape we ship,
+  not a character we hope the device happens to have.
+-->
+<body>
+<th:block th:fragment="sprite">
+<svg width="0" height="0" style="position:absolute;overflow:hidden" aria-hidden="true" focusable="false"><defs>
+
+  <!-- ============================= mail ============================= -->
+  <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M3 12h4l2 3h6l2-3h4"/><path d="M5.5 5h13l2.5 7v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5Z"/></symbol>
+  <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.5 6.5 8.5 6 8.5-6"/></symbol>
+  <symbol id="i-mail-open" viewBox="0 0 24 24"><path d="M3 10.5 12 4l9 6.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="m3 10.5 9 6 9-6"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M21.5 3.5 10.5 14.5"/><path d="M21.5 3.5 14.8 21l-4.3-6.5L4 10.2Z"/></symbol>
+  <symbol id="i-draft" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-9"/><path d="M14 3v6h6"/><path d="m17.2 12.4 2.4 2.4-4.4 4.4H12.8v-2.4Z"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4.5" rx="1.2"/><path d="M4.8 8.5h14.4V19a1.5 1.5 0 0 1-1.5 1.5H6.3A1.5 1.5 0 0 1 4.8 19Z"/><path d="M10 12.5h4"/></symbol>
+  <symbol id="i-spam" viewBox="0 0 24 24"><path d="M8.6 3h6.8L21 8.6v6.8L15.4 21H8.6L3 15.4V8.6Z"/><path d="M12 8v4.5"/><path d="M12 16.2h.01"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6.5h16"/><path d="M9.5 6.5V4.8a1.3 1.3 0 0 1 1.3-1.3h2.4a1.3 1.3 0 0 1 1.3 1.3v1.7"/><path d="M6.3 6.5 7.2 19a1.6 1.6 0 0 0 1.6 1.5h6.4a1.6 1.6 0 0 0 1.6-1.5l.9-12.5"/><path d="M10.4 10.3v6M13.6 10.3v6"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.6 2.66 5.5 6.04.86-4.37 4.2 1.04 5.97L12 17.3l-5.37 2.83 1.04-5.97-4.37-4.2 6.04-.86Z"/></symbol>
+  <symbol id="i-star-on" viewBox="0 0 24 24"><path fill="currentColor" d="m12 3.6 2.66 5.5 6.04.86-4.37 4.2 1.04 5.97L12 17.3l-5.37 2.83 1.04-5.97-4.37-4.2 6.04-.86Z"/></symbol>
+  <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9 7 4 12l5 5"/><path d="M4 12h8.5a6.5 6.5 0 0 1 6.5 6.5V20"/></symbol>
+  <symbol id="i-reply-all" viewBox="0 0 24 24"><path d="M7 7 2.5 12 7 17"/><path d="M12 7 7.5 12 12 17"/><path d="M7.5 12h6a6.5 6.5 0 0 1 6.5 6.5V20"/></symbol>
+  <symbol id="i-forward" viewBox="0 0 24 24"><path d="m15 7 5 5-5 5"/><path d="M20 12h-8.5A6.5 6.5 0 0 0 5 18.5V20"/></symbol>
+  <symbol id="i-attach" viewBox="0 0 24 24"><path d="M20 11.5 12.4 19a4.6 4.6 0 0 1-6.5-6.5l7.9-7.9a3.1 3.1 0 0 1 4.4 4.4l-7.9 7.9a1.6 1.6 0 0 1-2.2-2.2l7.1-7.1"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.2A2.2 2.2 0 0 1 5.2 5h3.4l2.2 2.6h8A2.2 2.2 0 0 1 21 9.8v7.6a2.2 2.2 0 0 1-2.2 2.2H5.2A2.2 2.2 0 0 1 3 17.4Z"/></symbol>
+  <symbol id="i-folder-move" viewBox="0 0 24 24"><path d="M3 7.2A2.2 2.2 0 0 1 5.2 5h3.4l2.2 2.6h8A2.2 2.2 0 0 1 21 9.8v7.6a2.2 2.2 0 0 1-2.2 2.2H5.2A2.2 2.2 0 0 1 3 17.4Z"/><path d="M9.5 13.4h6"/><path d="m13.2 11.1 2.3 2.3-2.3 2.3"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M3.5 11.6V4.8A1.3 1.3 0 0 1 4.8 3.5h6.8l8.9 8.9a1.8 1.8 0 0 1 0 2.5l-5.6 5.6a1.8 1.8 0 0 1-2.5 0Z"/><path d="M7.6 7.6h.01"/></symbol>
+
+  <!-- ============================ actions =========================== -->
+  <symbol id="i-compose" viewBox="0 0 24 24"><path d="M11.5 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5.5"/><path d="M17.4 3.4a2.1 2.1 0 0 1 3 3L12.6 14.2l-3.9.9.9-3.9Z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m20 20-4.4-4.4"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20.4 12a8.4 8.4 0 1 1-2.5-6"/><path d="M20.5 4.2v4.6h-4.6"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m4.5 12.5 5 5 10-11"/></symbol>
+  <symbol id="i-more-v" viewBox="0 0 24 24"><circle cx="12" cy="5.2" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="18.8" r="1.4"/></symbol>
+  <symbol id="i-more-h" viewBox="0 0 24 24"><circle cx="5.2" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18.8" cy="12" r="1.4"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 24 24"><path d="M3.5 5.5h17l-6.6 7.8V20l-3.8-2.2v-4.5Z"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3.5v11"/><path d="m7.6 10.2 4.4 4.4 4.4-4.4"/><path d="M4 17v2.2a1.3 1.3 0 0 0 1.3 1.3h13.4a1.3 1.3 0 0 0 1.3-1.3V17"/></symbol>
+  <symbol id="i-print" viewBox="0 0 24 24"><path d="M7 8.5V3.5h10v5"/><path d="M7 17.5H5.2A2.2 2.2 0 0 1 3 15.3v-4.6a2.2 2.2 0 0 1 2.2-2.2h13.6A2.2 2.2 0 0 1 21 10.7v4.6a2.2 2.2 0 0 1-2.2 2.2H17"/><path d="M7 14h10v6.5H7Z"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M13.5 4.5H19.5v6"/><path d="M19.5 4.5 11 13"/><path d="M18.5 14.5v4.2a1.3 1.3 0 0 1-1.3 1.3H5.3A1.3 1.3 0 0 1 4 18.7V6.8a1.3 1.3 0 0 1 1.3-1.3h4.2"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="1.8"/><path d="M15.5 8.5v-3a1.8 1.8 0 0 0-1.8-1.8H5.3a1.8 1.8 0 0 0-1.8 1.8v8.4a1.8 1.8 0 0 0 1.8 1.8h3"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M9.6 5.9A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17 17 0 0 1-3.2 4"/><path d="M6.3 7.6A17 17 0 0 0 2.5 12S6 18.5 12 18.5a9.4 9.4 0 0 0 4-.9"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m3.5 3.5 17 17"/></symbol>
+
+  <!-- =========================== navigation ========================= -->
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5.5 8.5 12l6.5 6.5"/></symbol>
+  <symbol id="i-next" viewBox="0 0 24 24"><path d="M9 5.5 15.5 12 9 18.5"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M5.5 9 12 15.5 18.5 9"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M5.5 15 12 8.5 18.5 15"/></symbol>
+  <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M20 12H4"/><path d="m10 6-6 6 6 6"/></symbol>
+  <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M4 12h16"/><path d="m14 6 6 6-6 6"/></symbol>
+
+  <!-- ====================== identity and security =================== -->
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.8"/><path d="M4.6 20.2a7.4 7.4 0 0 1 14.8 0"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9.5" cy="8" r="3.5"/><path d="M3 20a6.5 6.5 0 0 1 13 0"/><path d="M16.2 4.9a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.3A6.5 6.5 0 0 1 21 20"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="10" rx="2"/><path d="M8 10.5V7.8a4 4 0 0 1 8 0v2.7"/><path d="M12 14.4v2.4"/></symbol>
+  <symbol id="i-unlock" viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="10" rx="2"/><path d="M8 10.5V7.8a4 4 0 0 1 7.6-1.7"/><path d="M12 14.4v2.4"/></symbol>
+  <symbol id="i-logout" viewBox="0 0 24 24"><path d="M10 4.5H6.3A1.8 1.8 0 0 0 4.5 6.3v11.4A1.8 1.8 0 0 0 6.3 19.5H10"/><path d="M15.5 8.2 19.5 12l-4 3.8"/><path d="M19.5 12H9.2"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.2 19.5 6v6c0 4.4-3.1 8.2-7.5 9-4.4-.8-7.5-4.6-7.5-9V6Z"/><path d="m9.2 12 2 2 3.6-3.8"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.8" cy="15.2" r="4.3"/><path d="m10.9 12.1 8.6-8.6"/><path d="m16.8 6.2 2.4 2.4M14 9l2.4 2.4"/></symbol>
+  <symbol id="i-at" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.6"/><path d="M15.6 8.4v4.8a2.9 2.9 0 0 0 5.4 1.4A9.5 9.5 0 1 0 17.7 20"/></symbol>
+
+  <!-- ============================ platform ========================== -->
+  <symbol id="i-install" viewBox="0 0 24 24"><rect x="6.5" y="2.5" width="11" height="19" rx="2.4"/><path d="M12 7v6.6"/><path d="m9.4 11.2 2.6 2.6 2.6-2.6"/><path d="M10.6 5.2h2.8"/></symbol>
+  <symbol id="i-share-ios" viewBox="0 0 24 24"><path d="M12 3.5v11.2"/><path d="m8.5 7 3.5-3.5L15.5 7"/><path d="M6.8 10.5H5.5A1.5 1.5 0 0 0 4 12v7a1.5 1.5 0 0 0 1.5 1.5h13A1.5 1.5 0 0 0 20 19v-7a1.5 1.5 0 0 0-1.5-1.5h-1.3"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6.5" y="2.5" width="11" height="19" rx="2.4"/><path d="M10.8 18.4h2.4"/></symbol>
+  <!-- The meridians are one ellipse, not two mirrored cubics. The cubic form drew
+       a pair of near-straight lines that read as a crosshair rather than a globe. -->
+  <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M3.4 12h17.2"/><ellipse cx="12" cy="12" rx="3.9" ry="8.6"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="6.4" rx="1.6"/><rect x="3.5" y="13.6" width="17" height="6.4" rx="1.6"/><path d="M7.2 7.2h.01M7.2 16.8h.01"/></symbol>
+
+  <!-- ============================ console =========================== -->
+  <symbol id="i-dashboard" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="8.5" rx="1.4"/><rect x="13.5" y="3.5" width="7" height="5" rx="1.4"/><rect x="13.5" y="10.5" width="7" height="10" rx="1.4"/><rect x="3.5" y="15" width="7" height="5.5" rx="1.4"/></symbol>
+  <symbol id="i-campaign" viewBox="0 0 24 24"><path d="M4 9.5 18 4.5v15L4 14.5Z"/><path d="M4 9.5H3.2A1.2 1.2 0 0 0 2 10.7v2.6a1.2 1.2 0 0 0 1.2 1.2H4"/><path d="M20.5 10v4"/><path d="M7 15v4.4a1.1 1.1 0 0 0 1.1 1.1h1.8a1.1 1.1 0 0 0 1.1-1.1v-2.9"/></symbol>
+  <symbol id="i-journey" viewBox="0 0 24 24"><circle cx="6" cy="5.2" r="2.4"/><circle cx="18" cy="12" r="2.4"/><circle cx="6" cy="18.8" r="2.4"/><path d="M8.4 5.2H13a3 3 0 0 1 3 3v1.6M15.6 12H11a3 3 0 0 0-3 3v2"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8.5 6.5h12M8.5 12h12M8.5 17.5h12"/><path d="M4 6.5h.01M4 12h.01M4 17.5h.01"/></symbol>
+  <symbol id="i-block" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="m5.9 5.9 12.2 12.2"/></symbol>
+  <symbol id="i-verify" viewBox="0 0 24 24"><path d="M12 3.2 19.5 6v6c0 4.4-3.1 8.2-7.5 9-4.4-.8-7.5-4.6-7.5-9V6Z"/><path d="m9.2 12 2 2 3.6-3.8"/></symbol>
+  <symbol id="i-analytics" viewBox="0 0 24 24"><path d="M3.5 3.5v17h17"/><path d="m7 14.5 3.4-4.2 3.1 3 4.4-6.3"/></symbol>
+  <symbol id="i-log" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M3.5 8.6h17"/><path d="M7.6 12.6h8.8M7.6 16h5.6"/></symbol>
+  <symbol id="i-template" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="6" rx="1.5"/><rect x="3.5" y="13" width="7.4" height="7.5" rx="1.5"/><rect x="13.1" y="13" width="7.4" height="7.5" rx="1.5"/></symbol>
+  <symbol id="i-audit" viewBox="0 0 24 24"><path d="M13.6 3H6.6A2 2 0 0 0 4.6 5v14a2 2 0 0 0 2 2h10.8a2 2 0 0 0 2-2V8.6Z"/><path d="M13.6 3v5.6h5.8"/><path d="M8.4 13.6h6.4M8.4 17h4"/></symbol>
+  <!-- A gear built from a body circle and eight radial teeth, rather than the usual
+       single lobed path. That path is drawn to touch 0 and 24 on every side, so at a
+       1.75 stroke it clips against its own viewBox at every size we render. -->
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1"/><circle cx="12" cy="12" r="6"/><path d="M12 6V3.9M12 20.1V18M6 12H3.9M20.1 12H18M7.76 7.76 6.27 6.27M17.73 17.73l-1.49-1.49M16.24 7.76l1.49-1.49M6.27 17.73l1.49-1.49"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8.6a6 6 0 1 0-12 0c0 5.4-2.2 6.9-2.2 6.9h16.4S18 14 18 8.6"/><path d="M13.7 19.2a2 2 0 0 1-3.4 0"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M12 7.2V12l3.2 1.9"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6"/><path d="M12 11.2v5"/><path d="M12 7.9h.01"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M10.3 4.1 2.6 17.2a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.1a2 2 0 0 0-3.4 0Z"/><path d="M12 9.6v4"/><path d="M12 17.1h.01"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13.4 2.5 4 13.8h7L10.6 21.5 20 10.2h-7Z"/></symbol>
+  <symbol id="i-mailboxes" viewBox="0 0 24 24"><path d="M3.5 11.4h17V19a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 19Z"/><path d="m3.5 11.4 2.9-6.1h11.2l2.9 6.1"/><path d="M9.4 11.4V15h5.2v-3.6"/></symbol>
+
+</defs></svg>
+</th:block>
+</body>
+</html>
