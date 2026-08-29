@@ -1,6 +1,7 @@
 /* =========================================================================
    Jarurat Mail - per-mailbox settings sheet
-   Talks only to /api/mail/settings. Self contained on purpose: mail.html and
+   Talks to /api/mail/settings and /api/mail/notify/rules, and to nothing else.
+   Self contained on purpose: mail.html and
    mail.js belong to another agent this phase, so this file adds its own row to
    the account sheet, builds its own sheet, and carries its own styles. The only
    edit anybody else has to make is the one script tag that loads it.
@@ -20,6 +21,7 @@
   'use strict';
 
   var URL_SETTINGS = '/api/mail/settings';
+  var URL_RULES = '/api/mail/notify/rules';
 
   /* The one place the shape of a settings object is written down on this side.
      Used before the first fetch answers and whenever the mailbox is locked, so
@@ -38,15 +40,64 @@
     updatedAt: ''
   };
 
+  /* The same idea for the notification rules, which are a second endpoint rather than
+     more fields on the first one. They are kept apart because they are read by a
+     different consumer on a different schedule: the poll path asks for the rules on
+     every arrival and never wants a signature with them. */
+  var RULE_DEFAULTS = {
+    mailbox: '',
+    levels: ['everything', 'direct', 'vip', 'nothing'],
+    folders: { inbox: 'direct', archive: 'nothing' },
+    neverNotified: ['drafts', 'junk', 'spam', 'trash'],
+    quietEnabled: true, quietStartHour: 21, quietEndHour: 8, zone: 'Asia/Kolkata',
+    quietNow: false, quietSilences: true, quietHolds: false,
+    vips: [], maxVips: 100,
+    muted: [], muteDays: 30,
+    maxDirectRecipients: 12,
+    sharedWithMailbox: true,
+    updatedAt: ''
+  };
+
   var current = copy(DEFAULTS);
+  var rules = copy(RULE_DEFAULTS);
   var loaded = false;
   var loading = null;
+  var rulesLoaded = false;
+  var rulesLoading = null;
   var sheet = null;
   var open = false;
+
+  /* The VIP list being edited, which is not the stored one until Save.
+     Held apart from rules.vips because adding a name and then changing your mind has
+     to be free, and because the list is redrawn on its own without the whole sheet
+     being rebuilt underneath somebody's cursor. */
+  var vipDraft = [];
+
+  /* Whether this device has a push subscription, which is the only honest answer to
+     "will this reach me with the app shut". Undefined until the check answers. */
+  var pushReach = null;
+  /* Subscribed and proved are different facts and the screen must not conflate them:
+     the first only says this browser asked, the second says a push actually arrived. */
+  var pushSubscribed = false;
+  /* The mail server lets a push registration lapse a week after a mailbox stops being
+     opened. Somebody who only reads mail on a laptop needs telling that, or their phone
+     goes quiet with no explanation and they conclude the feature is broken. */
+  var pushExpiresAt = null;
 
   /* ------------------------------------------------------------------ tiny helpers */
 
   function copy(o) { var out = {}; for (var k in o) if (o.hasOwnProperty.call(o, k)) out[k] = o[k]; return out; }
+
+  /* A date somebody can act on: "12 Sep" rather than a timestamp. Falls back to the
+     raw value rather than throwing, because a lapse date the server phrased in a way
+     this does not expect is still worth showing. */
+  function shortDate(iso) {
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return String(iso);
+      return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+    } catch (e) { return String(iso); }
+  }
 
   function esc(s) {
     return String(s === null || s === undefined ? '' : s)
@@ -127,6 +178,185 @@
   }
 
   /**
+   * The notification rules, treating a locked mailbox as an ordinary answer.
+   *
+   * A separate fetch from the settings one rather than a merged endpoint. They are
+   * saved together from one button, but they are read by different things at
+   * different times, and a poll path that wants to know whether a message earns a
+   * sound should not be pulling a signature down the wire to find out.
+   */
+  function loadRules(force) {
+    if (rulesLoaded && !force) return Promise.resolve(rules);
+    if (rulesLoading) return rulesLoading;
+    rulesLoading = fetch(URL_RULES, { headers: { 'Accept': 'application/json' } })
+      .then(function (res) {
+        if (res.status === 409 || res.status === 401 || res.status === 403) return null;
+        return res.json().catch(function () { return null; });
+      })
+      .then(function (data) {
+        if (data && !data.error) {
+          rules = data;
+          rulesLoaded = true;
+          vipDraft = (data.vips || []).slice();
+          announceRules();
+        }
+        rulesLoading = null;
+        return rules;
+      })
+      .catch(function () { rulesLoading = null; return rules; });
+    return rulesLoading;
+  }
+
+  /**
+   * Saves the rules.
+   *
+   * form is a URLSearchParams rather than a plain object, because two of the fields
+   * repeat: a VIP list is sent as one vip parameter per entry, which is how a form
+   * sends a list without anybody having to pick a separator that will one day turn up
+   * inside somebody's address.
+   */
+  function saveRules(form) {
+    return fetch(URL_RULES, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-XSRF-TOKEN': token() },
+      body: form.toString()
+    }).then(function (res) {
+      return res.json().catch(function () { return null; }).then(function (data) {
+        if (!res.ok || (data && data.error)) {
+          throw new Error((data && data.error) || 'The notification rules could not be saved.');
+        }
+        rules = data;
+        rulesLoaded = true;
+        vipDraft = (data.vips || []).slice();
+        announceRules();
+        return data;
+      });
+    });
+  }
+
+  function announceRules() {
+    try {
+      window.dispatchEvent(new CustomEvent('mailnotify:rules', { detail: rules }));
+    } catch (e) { /* see announce() */ }
+  }
+
+  /* ------------------------------------------------------------------ permission */
+
+  /**
+   * Whether this page is running as an installed app rather than in a browser tab.
+   *
+   * Two tests because the two platforms answer differently and only one of them is
+   * standard: navigator.standalone is Safari's, and the display-mode media query is
+   * everybody else's. A page that only asked the standard one would decide that every
+   * iPhone home screen app was a tab and print the install instructions at somebody
+   * who had already followed them.
+   */
+  function installed() {
+    try {
+      if (navigator.standalone === true) return true;
+      return !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+    } catch (e) { return false; }
+  }
+
+  function isIos() {
+    var ua = navigator.userAgent || '';
+    if (/iPad|iPhone|iPod/.test(ua)) return true;
+    // An iPad on iPadOS 13 and later reports itself as a Mac, and the touch count is
+    // the only thing left that separates the two.
+    return ua.indexOf('Mac') >= 0 && navigator.maxTouchPoints > 1;
+  }
+
+  /**
+   * The one function that decides what the notification control is allowed to claim.
+   *
+   * Five answers, and every one of them has to be drawn differently, because a toggle
+   * that cannot work is worse than no toggle at all: the person flips it, nothing
+   * happens, and they conclude the application is broken rather than that their
+   * browser said no. Nothing here guesses; each branch is a fact the browser told us.
+   *
+   *   unsupported - no Notification constructor on this origin at all
+   *   install     - iOS, and this is a Safari tab. WebKit gives a tab no PushManager
+   *                 and no notification permission whatever, and no amount of asking
+   *                 changes it. The app has to be on the Home Screen first.
+   *   default     - never asked. The only state where a button may raise the prompt.
+   *   granted     - on
+   *   denied      - refused, or auto-blocked by Chrome's quiet UI, which is
+   *                 indistinguishable from a refusal and has the same recovery.
+   */
+  function permissionState() {
+    if (typeof Notification === 'undefined') {
+      return isIos() && !installed() ? 'install' : 'unsupported';
+    }
+    if (isIos() && !installed()) return 'install';
+    return Notification.permission;
+  }
+
+  /**
+   * Where the person has to go to undo a refusal.
+   *
+   * Written per browser because "check your browser settings" is not an instruction,
+   * it is an apology. A refusal cannot be re-prompted from script under any
+   * circumstances, so this sentence is the entire recovery path and it is worth
+   * getting exactly right for the three browsers this organisation actually uses.
+   */
+  function recoveryHint() {
+    var ua = navigator.userAgent || '';
+    if (isIos()) return 'Open Settings, then Notifications, then Jarurat Mail.';
+    if (/Android/.test(ua)) {
+      return 'Tap the icon at the left of the address bar, then Permissions, then Notifications.';
+    }
+    if (/Edg\//.test(ua)) {
+      return 'Click the icon at the left of the address bar, then set Notifications to Allow.';
+    }
+    if (/Firefox\//.test(ua)) {
+      return 'Click the padlock at the left of the address bar, then clear the blocked '
+        + 'Notifications permission.';
+    }
+    return 'Click the icon at the left of the address bar, then set Notifications to Allow.';
+  }
+
+  /**
+   * Whether a push subscription exists on this device.
+   *
+   * This is the difference between "we will tell you" and "we will tell you while you
+   * are looking", and it is the one claim on this screen that must never be made on
+   * faith. It is read from the service worker registration rather than from anything
+   * this file believes, so if the push half of the feature is not deployed, or the
+   * subscription has lapsed, the sentence downgrades itself without anybody editing it.
+   */
+  function checkPushReach() {
+    if (!navigator.serviceWorker || !('PushManager' in window)) {
+      pushReach = false;
+      return Promise.resolve(false);
+    }
+    /* A subscription that EXISTS is not a subscription that WORKS, and telling
+       somebody their phone will be woken when it will not is worse than saying
+       nothing. The mail server signs and encrypts these itself, so if its VAPID key
+       is unset or is a different key from the one the browser subscribed with, the
+       push service answers 403 forever and not one notification is ever delivered.
+       Nothing on this device can observe that by looking at its own subscription.
+
+       jmNotify.pushProved is the only honest signal: it is set when a push has
+       actually arrived at this device at least once. Until that has happened the
+       screen says push is not proved, whatever getSubscription reports. */
+    return navigator.serviceWorker.ready
+      .then(function (reg) { return reg.pushManager.getSubscription(); })
+      .then(function (sub) {
+        var proved = false;
+        var api = window.jmNotify;
+        if (api && typeof api.state === 'function') {
+          var st = api.state() || {};
+          proved = !!st.pushProved;
+          pushExpiresAt = st.pushExpiresAt || null;
+        }
+        pushSubscribed = !!sub;
+        pushReach = !!sub && proved;
+        return pushReach;
+      })
+      .catch(function () { pushReach = false; pushSubscribed = false; return false; });
+  }
+
+  /**
    * Tells the rest of the screen the settings moved.
    *
    * A custom event rather than a callback register, because the composer, the
@@ -189,6 +419,21 @@
       + '.ms-state .ic{flex:none;margin-top:1px}'
       + '.ms-state.warn{border-color:var(--danger);color:var(--danger-fg);background:rgba(224,72,60,.09)}'
       + '.ms-state.on{border-color:var(--primary);color:var(--text)}'
+      /* The VIP list. A plain list of rows rather than chips, because each entry
+         carries a checkbox of its own and a chip with a checkbox inside it is a
+         44px tap target wrapped around two smaller ones. */
+      + '.ms-vips{list-style:none;margin:8px 0 0;padding:0}'
+      + '.ms-vip{display:flex;align-items:center;gap:8px;min-height:44px;'
+      + 'border-top:1px solid var(--border);padding:4px 0}'
+      + '.ms-vip:first-child{border-top:0}'
+      + '.ms-vip .ms-vip-a{flex:1;min-width:0;font-size:13px;overflow:hidden;'
+      + 'text-overflow:ellipsis;white-space:nowrap}'
+      + '.ms-vip .ms-vip-q{display:flex;align-items:center;gap:6px;flex:none;'
+      + 'font-size:12px;color:var(--text-dim);cursor:pointer;padding:11px 0}'
+      + '.ms-vip .pib{flex:none}'
+      + '.ms-add{display:flex;gap:8px;align-items:stretch}'
+      + '.ms-add input{flex:1;min-width:0}'
+      + '.ms-empty{font-size:12px;color:var(--text-mute);padding:10px 0}'
       + '#msSheet .sheet-f{gap:8px}';
     var tag = document.createElement('style');
     tag.id = 'msStyle';
@@ -233,8 +478,219 @@
       + icon(sprite, 'ic-sm') + '</button>';
   }
 
+  /* ------------------------------------------------------------------ notifications */
+
+  var LEVEL_LABELS = {
+    everything: 'Every message',
+    direct: 'Messages to me, and VIPs',
+    vip: 'VIPs only',
+    nothing: 'Nothing'
+  };
+
+  var FOLDER_LABELS = { inbox: 'Inbox', archive: 'Archive' };
+
+  function folderLabel(role) {
+    if (FOLDER_LABELS[role]) return FOLDER_LABELS[role];
+    return role.charAt(0).toUpperCase() + role.slice(1);
+  }
+
+  function pad(h) { return (h < 10 ? '0' : '') + h; }
+
+  function hourOptions(chosen) {
+    var options = [];
+    for (var h = 0; h < 24; h++) options.push([h, (h < 10 ? '0' : '') + h + ':00']);
+    return optionList(options, chosen);
+  }
+
+  /**
+   * The notifications section.
+   *
+   * The order is deliberate and it is the order of the questions somebody actually
+   * has: can this reach me at all, then what is loud, then when is it never loud,
+   * then who is the exception. The permission block is first because every control
+   * under it is meaningless if the answer to the first question is no, and putting it
+   * last is how a person spends five minutes setting rules that will never fire.
+   */
+  function notifySection(r) {
+    var folders = r.folders || {};
+    var rows = '';
+    for (var role in folders) {
+      if (!Object.prototype.hasOwnProperty.call(folders, role)) continue;
+      var options = [];
+      for (var i = 0; i < (r.levels || []).length; i++) {
+        var id = r.levels[i];
+        options.push([id, LEVEL_LABELS[id] || id]);
+      }
+      rows += '<div class="field"><label for="msLvl-' + esc(role) + '">'
+        + esc(folderLabel(role)) + '</label>'
+        + '<select id="msLvl-' + esc(role) + '" data-folder="' + esc(role) + '">'
+        + optionList(options, folders[role]) + '</select></div>';
+    }
+
+    return ''
+      + '<section class="ms-sec">'
+      + '<h4>' + icon('i-bell') + 'Notifications</h4>'
+      + '<div id="msNotifyState"></div>'
+
+      + '<p class="hint">Two dials, not one. The level below decides what is allowed to '
+      + 'make a sound. Everything else that reaches the Inbox still appears, in full and '
+      + 'silently, so nothing is hidden from you to keep it quiet.</p>'
+      /* Full width and stacked rather than the two-column ms-grid the rest of this
+         sheet uses. Measured at 390: the grid puts two selects side by side and clips
+         "Messages to me, and VIPs" to "Messages to me, an", which turns the one
+         control on this screen whose whole job is to be unambiguous into a guess. */
+      + '<div>' + rows + '</div>'
+      + '<p class="hint">Junk, Spam, Trash and Drafts never notify, and that is not a '
+      + 'setting. A message in the spam folder is a message the server already doubted, '
+      + 'and putting one on a lock screen is doing the phishing for them.</p>'
+      + (r.sharedWithMailbox
+          ? '<p class="hint">These rules belong to ' + esc(r.mailbox || 'this mailbox')
+            + ' rather than to you, so anyone else who opens this mailbox sees and changes '
+            + 'the same ones. Whether your phone is allowed to notify at all is yours '
+            + 'alone and stays on this device.</p>'
+          : '')
+
+      // ---- quiet hours
+      + check('msQuietOn', 'Quiet hours', r.quietEnabled)
+      + '<div class="ms-grid">'
+      + '<div class="field"><label for="msQuietFrom">Quiet from</label>'
+      + '<select id="msQuietFrom">' + hourOptions(r.quietStartHour) + '</select></div>'
+      + '<div class="field"><label for="msQuietTo">Until</label>'
+      + '<select id="msQuietTo">' + hourOptions(r.quietEndHour) + '</select></div>'
+      + '</div>'
+      /* The sentence that has to be here rather than in a help page. Which of the two
+         plausible behaviours this picked is the single thing a person needs to know
+         about quiet hours, and getting it wrong in their head costs them a message. */
+      + '<p class="hint">Quiet hours take the sound off. They do not hold anything back. '
+      + 'A message that arrives at two in the morning is on your phone at two in the '
+      + 'morning, silently, with the right time on it, so checking at three tells you the '
+      + 'truth instead of nothing. Times are ' + esc(r.zone || 'Asia/Kolkata')
+      + ', the same hours campaigns use.</p>'
+
+      // ---- VIPs
+      + '<h4 style="margin-top:16px">' + icon('i-star') + 'VIPs</h4>'
+      + '<p class="hint">One address, or a whole organisation written @tmc.gov.in. VIPs '
+      + 'get through at every level, including past the automatic-mail rule. Tick Even at '
+      + 'night beside one to let them through quiet hours as well; that is the only way '
+      + 'anything makes a sound between ' + esc(pad(r.quietStartHour)) + ':00 and '
+      + esc(pad(r.quietEndHour)) + ':00.</p>'
+      + '<div class="ms-add">'
+      + '<input id="msVipNew" type="email" inputmode="email" autocomplete="off" '
+      + 'placeholder="anand@tmc.gov.in or @tmc.gov.in" aria-label="Add a VIP">'
+      + '<button class="btn" type="button" id="msVipAdd">Add</button>'
+      + '</div>'
+      + '<ul class="ms-vips" id="msVipList"></ul>'
+      + '</section>';
+  }
+
+  /** Only the list, so adding a name does not rebuild the sheet under the cursor. */
+  function paintVips() {
+    var list = $s('#msVipList');
+    if (!list) return;
+    if (!vipDraft.length) {
+      list.innerHTML = '<li class="ms-empty">Nobody yet. Until somebody is here, the '
+        + 'Messages to me level is what decides, which needs no list to work.</li>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < vipDraft.length; i++) {
+      var vip = vipDraft[i];
+      html += '<li class="ms-vip">'
+        + icon(vip.quietBreak ? 'i-star-on' : 'i-star', 'ic-sm')
+        + '<span class="ms-vip-a">' + esc(vip.address) + '</span>'
+        + '<label class="ms-vip-q"><input type="checkbox" data-vip-quiet="' + i + '"'
+        + (vip.quietBreak ? ' checked' : '') + '> Even at night</label>'
+        + '<button class="pib" type="button" data-vip-remove="' + i + '" '
+        + 'aria-label="Remove ' + esc(vip.address) + '">' + icon('i-close', 'ic-sm')
+        + '</button></li>';
+    }
+    list.innerHTML = html;
+  }
+
+  /**
+   * The permission block, which is the only part of this sheet that is allowed to
+   * refuse to draw a control.
+   *
+   * Every branch here ends in either a working button or a sentence that says what to
+   * do instead. What it never does is show something switch-shaped that cannot work,
+   * because the person will flip it, see nothing happen, and stop believing the rest
+   * of the screen as well.
+   */
+  function paintNotifyState() {
+    var box = $s('#msNotifyState');
+    if (!box) return;
+    var state = permissionState();
+    var html = '';
+
+    if (state === 'unsupported') {
+      html = '<div class="ms-state">' + icon('i-info', 'ic-sm')
+        + '<span>This browser has no notifications. The unread count in the tab title and '
+        + 'on the icon still works, and needs no permission.</span></div>';
+
+    } else if (state === 'install') {
+      // WebKit is unambiguous: a site open in a Safari tab has no PushManager and no
+      // notification permission at all. There is nothing to toggle, so the honest
+      // control is the instruction that leads to one.
+      html = '<div class="ms-state">' + icon('i-share-ios', 'ic-sm')
+        + '<span><strong>Notifications on iPhone and iPad need this on your Home Screen '
+        + 'first.</strong> Tap Share, then Add to Home Screen, then open Jarurat Mail from '
+        + 'there and turn notifications on. Safari cannot do it from a tab, whatever is set '
+        + 'below. While this tab is open, new mail still updates the count on the '
+        + 'title.</span></div>';
+
+    } else if (state === 'denied') {
+      // A denial cannot be re-prompted from script, and repeated attempts feed Chrome's
+      // auto-block. So this is a sentence and never a button.
+      html = '<div class="ms-state warn">' + icon('i-warn', 'ic-sm')
+        + '<span><strong>Your browser is blocking notifications for this site.</strong> '
+        + esc(recoveryHint())
+        + ' The unread count in the tab title and on the icon still works.</span></div>';
+
+    } else if (state === 'granted') {
+      html = '<div class="ms-state on">' + icon('i-check', 'ic-sm')
+        + '<span>Notifications are on for this device.'
+        /* Three states, not two, because "subscribed" and "proved" are different
+           facts. Saying a phone will be woken when no push has ever arrived is the
+           one claim on this screen that a person would act on and be let down by:
+           they would stop checking. So a subscription that has not yet delivered
+           says so plainly rather than being rounded up to working. */
+        + (pushReach === true
+            ? ' Your phone will be told even with this closed.'
+            : pushSubscribed
+              ? ' This device is registered, but no notification has arrived on it yet, '
+                + 'so it is not proven to reach you with everything closed. Until one does, '
+                + 'they show while Jarurat Mail is open somewhere.'
+              : pushReach === false
+                ? ' They reach you while Jarurat Mail is open somewhere. With every window '
+                  + 'closed, nothing is delivered to this device.'
+                : '')
+        + (pushReach === true && pushExpiresAt
+            ? ' <span class="ms-dim">Registration lapses on ' + esc(shortDate(pushExpiresAt))
+              + ' unless you open your mailbox before then.</span>'
+            : '')
+        + '</span></div>';
+
+    } else {
+      html = '<div class="ms-state">' + icon('i-bell', 'ic-sm')
+        + '<span>Notifications are off on this device. Your browser will ask once, and a '
+        + 'refusal cannot be undone from here, so the rules below are worth setting first.'
+        + '<br><button class="btn pri" type="button" id="msNotifyAsk" '
+        + 'style="margin-top:10px">Turn on notifications</button></span></div>';
+    }
+
+    if (rules.quietNow) {
+      html += '<div class="ms-state">' + icon('i-clock', 'ic-sm')
+        + '<span>It is quiet hours now, so anything arriving is being shown without a '
+        + 'sound.</span></div>';
+    }
+    box.innerHTML = html;
+  }
+
   function body(s) {
     return ''
+      // ---- notifications
+      + notifySection(rules)
+
       // ---- signature
       + '<section class="ms-sec">'
       + '<h4>' + icon('i-signature') + 'Signature</h4>'
@@ -430,7 +886,29 @@
       if (e.target === sheet || e.target.closest('[data-ms-close]')) { close(); return; }
       var fxBtn = e.target.closest('.ms-fx');
       if (fxBtn) { e.preventDefault(); runCommand(fxBtn); return; }
+      // The permission ask has to run inside this click and nowhere else. Browsers
+      // that require a gesture drop a request that arrives from a timer or a promise
+      // callback, silently, and it looks exactly like a person refusing. It goes
+      // through jmNotify.enable rather than calling requestPermission here, because
+      // notify.js already owns that prompt and two files asking is two chances to
+      // spend a permission that can only be spent once.
+      if (e.target.closest('#msNotifyAsk')) { askForPermission(); return; }
+      if (e.target.closest('#msVipAdd')) { addVip(); return; }
+      var remove = e.target.closest('[data-vip-remove]');
+      if (remove) {
+        vipDraft.splice(parseInt(remove.getAttribute('data-vip-remove'), 10), 1);
+        paintVips();
+        return;
+      }
       if (e.target.closest('#msSave')) commit();
+    });
+    // Enter in the VIP box adds rather than submitting nothing, which is what every
+    // person who has ever met a box with an Add button beside it expects.
+    sheet.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && e.target && e.target.id === 'msVipNew') {
+        e.preventDefault();
+        addVip();
+      }
     });
     sheet.addEventListener('input', function (e) {
       if (e.target.classList && e.target.classList.contains('ms-edit')) markEmpty(e.target);
@@ -439,6 +917,11 @@
     sheet.addEventListener('mouseup', paintToolbar);
     sheet.addEventListener('change', function (e) {
       if (e.target.id === 'msVacOn') paintVacationState();
+      var quiet = e.target.getAttribute && e.target.getAttribute('data-vip-quiet');
+      if (quiet !== null && quiet !== undefined) {
+        var vip = vipDraft[parseInt(quiet, 10)];
+        if (vip) { vip.quietBreak = e.target.checked; paintVips(); }
+      }
     });
     // Escape closes this sheet and stops there. Letting it reach mail.js would pop
     // the history entry as well, and the pane behind would slide at the same time.
@@ -472,6 +955,65 @@
     box.innerHTML = html;
   }
 
+  /**
+   * Adds whatever is in the box to the draft list, or says why it did not.
+   *
+   * The server validates this properly and its message is the one that would be shown
+   * on Save. Repeating a rough version of the check here is not duplication for its
+   * own sake: without it, a typo is only discovered after the person has closed the
+   * sheet, and the failure arrives detached from the box they typed into.
+   */
+  function addVip() {
+    var input = $s('#msVipNew');
+    if (!input) return;
+    var raw = (input.value || '').trim().toLowerCase();
+    if (!raw) return;
+
+    var address = raw;
+    if (address.indexOf('@') < 0) address = '@' + address;
+    if (address.indexOf(' ') >= 0 || address.indexOf('.') < 0
+        || address.lastIndexOf('@') !== address.indexOf('@')
+        || address.charAt(address.length - 1) === '@') {
+      say('Write one address, like anand@tmc.gov.in, or a whole organisation, '
+        + 'like @tmc.gov.in.', true);
+      return;
+    }
+    for (var i = 0; i < vipDraft.length; i++) {
+      if (vipDraft[i].address === address) { input.value = ''; return; }
+    }
+    if (vipDraft.length >= (rules.maxVips || 100)) {
+      say('That is the limit of ' + (rules.maxVips || 100) + ' VIPs. A list that long is '
+        + 'not a list of people who matter more.', true);
+      return;
+    }
+    vipDraft.push({ address: address, domain: address.charAt(0) === '@', quietBreak: false });
+    input.value = '';
+    paintVips();
+    input.focus();
+  }
+
+  /**
+   * Raises the browser prompt, then watches for the answer.
+   *
+   * requestPermission's answer does not always come back through the call that raised
+   * it on every browser, and the permissions API is missing on some older Safari
+   * builds, so the state is re-read a few times over the next couple of seconds and
+   * again whenever the tab comes back. A person who granted the permission and came
+   * back to a screen still saying it is off would conclude it had failed.
+   */
+  function askForPermission() {
+    if (window.jmNotify && typeof window.jmNotify.enable === 'function') {
+      window.jmNotify.enable();
+    } else if (typeof Notification !== 'undefined') {
+      try { Notification.requestPermission(); } catch (e) { /* not available here */ }
+    }
+    var tries = 0;
+    var timer = setInterval(function () {
+      paintNotifyState();
+      if (++tries >= 6 || permissionState() !== 'default') clearInterval(timer);
+    }, 500);
+  }
+
   function paint() {
     if (!sheet) build();
     $s('#msBody').innerHTML = body(current);
@@ -479,6 +1021,8 @@
     var editors = sheet.querySelectorAll('.ms-edit');
     for (var i = 0; i < editors.length; i++) markEmpty(editors[i]);
     paintVacationState();
+    paintNotifyState();
+    paintVips();
   }
 
   function commit() {
@@ -504,7 +1048,16 @@
       requestReadReceipt: $s('#msReceipt').checked
     };
 
+    /* One button, two endpoints. They are posted together rather than merged into one
+       call because they are genuinely two resources with two different readers, and
+       merged they would mean the poll path pulling a signature down every time it
+       wanted to know whether a message earns a sound. In sequence rather than at once,
+       because the settings save is the one that can be refused for a reason worth
+       stopping on, and writing rules against a form the server has just rejected would
+       leave the two halves of this sheet describing different states. */
     save(form).then(function (data) {
+      return saveRules(ruleForm()).then(function () { return data; });
+    }).then(function (data) {
       if (button) { button.disabled = false; button.textContent = 'Save'; }
       // Repaint rather than close. The out of office line is the one thing on this
       // sheet whose truth only arrives with the answer, and closing on success would
@@ -517,6 +1070,33 @@
       if (button) { button.disabled = false; button.textContent = 'Save'; }
       say(e.message || 'The settings could not be saved.', true);
     });
+  }
+
+  /**
+   * The notification rules as a form body.
+   *
+   * The VIP list is always sent, marked by the vips parameter, because an empty list
+   * is a thing somebody can mean and the endpoint cannot tell "I removed everybody"
+   * from "this request was not about VIPs" without being told. The pipe carries the
+   * quiet-hours flag rather than a second parallel parameter, which would go out of
+   * step with the first the moment one entry failed to parse.
+   */
+  function ruleForm() {
+    // Not named body: that is a function in this file, and a local shadowing it here
+    // would read as an assignment to it three months from now.
+    var out = new URLSearchParams();
+    var selects = sheet.querySelectorAll('[data-folder]');
+    for (var i = 0; i < selects.length; i++) {
+      out.append('folder.' + selects[i].getAttribute('data-folder'), selects[i].value);
+    }
+    out.append('quietEnabled', $s('#msQuietOn') ? $s('#msQuietOn').checked : rules.quietEnabled);
+    if ($s('#msQuietFrom')) out.append('quietStartHour', $s('#msQuietFrom').value);
+    if ($s('#msQuietTo')) out.append('quietEndHour', $s('#msQuietTo').value);
+    out.append('vips', '1');
+    for (var v = 0; v < vipDraft.length; v++) {
+      out.append('vip', vipDraft[v].address + '|' + (vipDraft[v].quietBreak ? '1' : '0'));
+    }
+    return out;
   }
 
   /* ------------------------------------------------------------------ open and close */
@@ -537,6 +1117,11 @@
     open = true;
     sheet.classList.add('open');
     load(true).then(paint);
+    loadRules(true).then(paint);
+    // Asked every time the sheet opens rather than once at start, because a
+    // subscription can appear or lapse between two visits and the sentence it decides
+    // is the one claim on this screen that must never be stale.
+    checkPushReach().then(paintNotifyState);
     paint();
     var first = $s('#msSig');
     if (first) requestAnimationFrame(function () { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } });
@@ -590,11 +1175,40 @@
     else menu.appendChild(row);
   }
 
+  /**
+   * Repaints when the permission changes outside this page.
+   *
+   * Without this, somebody follows the recovery instruction above, flips the switch in
+   * their browser settings, comes back to a tab that still believes it is blocked, and
+   * concludes the application is broken. It is three lines and it is the difference
+   * between a recovery path that works and one that only reads as though it does.
+   *
+   * navigator.permissions is missing on some older Safari builds, so the whole thing is
+   * guarded and the visibilitychange listener below is the fallback: coming back to the
+   * tab is when a permission changed elsewhere is most likely to be stale.
+   */
+  function watchPermission() {
+    try {
+      if (!navigator.permissions || !navigator.permissions.query) return;
+      navigator.permissions.query({ name: 'notifications' }).then(function (status) {
+        status.onchange = function () { if (open) paintNotifyState(); };
+      }).catch(function () { /* some browsers refuse this descriptor by name */ });
+    } catch (e) { /* older Safari */ }
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden && open) paintNotifyState();
+  });
+
   function start() {
     mount();
     // Warmed once so the composer can ask for a signature synchronously on the very
     // first compose. A locked mailbox answers 409 and leaves the defaults in place.
     load(false);
+    // The rules are warmed too, because the poll path wants them on the first arrival
+    // rather than on the first time somebody opens this sheet.
+    loadRules(false);
+    watchPermission();
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
@@ -622,6 +1236,23 @@
       return kind === 'reply' ? (current.signatureForReply || '') : (current.signatureForNew || '');
     },
     /** True when this mailbox is answering automatically right now. */
-    answeringAutomatically: function () { return !!current.vacationActive; }
+    answeringAutomatically: function () { return !!current.vacationActive; },
+
+    /**
+     * The notification rules, for whoever paints the notification.
+     *
+     * Exported because the lane a message earns is decided on the server and the
+     * thing that draws the notification is a different file again, so this is the
+     * one place both of them can read the same answer without a second fetch. Never
+     * null: the defaults stand in until the first answer arrives.
+     */
+    rules: function () { return rules; },
+    loadRules: loadRules,
+
+    /**
+     * What this device can actually do, in one word, for a caller that wants to
+     * decide whether to bother. Same five answers the sheet draws.
+     */
+    permissionState: permissionState
   };
 })();

@@ -1,22 +1,28 @@
 /* New-mail notifications for Jarurat Mail.
  *
- * Two designs were on the table and only one of them is here, so the choice is
- * written down rather than left to be reverse engineered:
+ * Two transports, and this file now drives both. The earlier version of this
+ * comment said Web Push had deliberately not been started; that is no longer
+ * true and the reasoning it gave has been overtaken, so it is replaced rather
+ * than left to mislead the next person.
  *
- *   Web Push is the version that reaches a phone with the app shut. It needs a
- *       VAPID key pair, a PushSubscription row per user per device with its own
- *       expiry and re-subscription handling, a server that signs and posts to
- *       fcm.googleapis.com and web.push.apple.com, and above all something that
- *       tells this application a message arrived: Stalwart has to run a hook on
- *       delivery, or we hold a long-lived JMAP EventSource per mailbox. That is a
- *       database migration, a new outbound dependency, an Apple developer
- *       relationship for iOS, and a delivery path that fails silently. It is
- *       real work and it was deliberately not started here, because a half-built
- *       push subscription that never fires is worse than no push at all.
+ *   Web Push is the version that reaches a phone with the app shut, and the one
+ *       thing that made it look expensive turned out not to be ours to pay.
+ *       Stalwart implements JMAP PushSubscription including the VAPID signing
+ *       and the aes128gcm encryption, so the browser's own subscription is
+ *       registered with the mail server and Stalwart posts to Apple and Google
+ *       directly. This application is not in the delivery path, holds no key,
+ *       writes no crypto and keeps no mailbox password to do it. What this file
+ *       owns is the browser half: asking, subscribing, handing the subscription
+ *       to the server, and standing the poll down once a push has actually
+ *       arrived. The rendering and the clicking live in sw.js.
  *
- *   In-app polling, which is this file, only works while a tab is open. On a
- *       laptop left open all day that is most of the working day, it needs no
- *       schema, no keys and no third party, and it is honest about its limits.
+ *   In-app polling, which is the rest of this file, only works while a tab is
+ *       open. It stays, because it is the fallback for every browser and every
+ *       device where push is unavailable or unproven, and because it is the only
+ *       thing that keeps the unread COUNT honest: a push fires on delivery and
+ *       says nothing at all when somebody reads a message on another device.
+ *
+ * The two never run at full rate together. See pushWorking() and interval().
  *
  * The part of this file that works for everybody, with no permission prompt and
  * no decision to make, is the unread count in the tab title and painted onto the
@@ -70,7 +76,43 @@
     var ASK_KEY = 'jm.notify.asked';
     var ASK_SNOOZE_DAYS = 14;
 
-    var TAG = 'jm-newmail';
+    /* Page-created notifications carry the same tag scheme sw.js uses, so a
+       message announced by a poll and the same message announced by a push
+       replace one another instead of appearing twice. That is not theoretical:
+       the two paths overlap for the whole first minute after a subscription is
+       made and again on every rotation. */
+    function tagFor(id) { return 'jm-a:' + id; }
+
+    /* Page-created notifications are capped at this many on screen at once, for
+       the reason the collapse rule in sw.js gives: past three the browser starts
+       folding them behind a summary of its own and we have lost control of what
+       is read. */
+    var PAGE_MAX = 3;
+
+    var PUSH_CONFIG_URL = '/api/mail/push/config';
+    var PUSH_SUBSCRIBE_URL = '/api/mail/push/subscribe';
+
+    /* A stable id for THIS browser on THIS device, so a re-subscribe replaces
+       the old row rather than adding a second one. Stalwart does not deduplicate
+       by deviceClientId, so two subscriptions really do mean two notifications
+       for the same message, and the id is the only thing that lets the server
+       destroy the stale one. It identifies a browser profile and nothing else:
+       no mailbox, no person, no secret. */
+    var DEVICE_KEY = 'jm.notify.device';
+
+    /* Where the poll interval goes once push has proved itself.
+
+       Fifteen minutes and not zero, and the difference is worth defending. Push
+       fires on delivery, so it covers the arrival case completely and the timer
+       is genuinely not needed for it. What push says nothing about is a message
+       being READ somewhere else, which is most of what moves the unread count on
+       a shared mailbox: the phone would keep showing four on the tab title and
+       the favicon for as long as the tab stayed open. So the timer stays as a
+       slow correction, and the fast path is event driven, from the push handler
+       itself, which posts jm-push-refresh to every open tab. A person with push
+       working pays one request per fifteen minutes instead of one per
+       forty-five seconds, and their badge is still right. */
+    var PUSH_IDLE_MS = 900000;
 
     var S = {
         timer: null,
@@ -94,7 +136,26 @@
         baselined: false,
         inFlight: false,
         baseTitle: document.title,
-        titleGuard: false
+        titleGuard: false,
+        /* Everything known about push on this device. supported is the server's
+           answer, which is false whenever Stalwart is not configured with a
+           VAPID key; seen is the only honest proof that a push ever arrived,
+           because the subscription verifies itself server side without one. */
+        push: {
+            checked: false,
+            supported: false,
+            key: null,
+            emailPush: false,
+            state: 'off',
+            seen: false,
+            endpoint: null,
+            expiresAt: null
+        },
+        /* The mailbox pinned to this session, as the poll endpoint reports it.
+           Read and never chosen: MailboxAccess pins it server side and no
+           endpoint in this application takes it as a parameter, so this is a
+           label for the notification tag and nothing more. */
+        mailbox: ''
     };
 
     /* ====================================================================
@@ -243,8 +304,26 @@
         S.timer = setTimeout(tick, ms);
     }
 
+    /**
+     * True when push is not merely subscribed but has demonstrably delivered
+     * something to this device.
+     *
+     * Deliberately not "we have a subscription". A subscription is verified by
+     * the server reading the verification code straight back off the mail
+     * server, with no push involved, so a verified subscription is evidence of
+     * nothing. Standing the poll down on that would be how a person ends up
+     * with neither transport working and no way to tell.
+     */
+    function pushWorking() {
+        return !!(S.push.seen
+            && S.push.endpoint
+            && typeof Notification !== 'undefined'
+            && Notification.permission === 'granted');
+    }
+
     function interval() {
         if (S.backoff) return S.backoff;
+        if (pushWorking()) return PUSH_IDLE_MS;
         return document.hidden ? HIDDEN_MS : ACTIVE_MS;
     }
 
@@ -327,6 +406,7 @@
      */
     function absorb(data) {
         paint(typeof data.unread === 'number' ? data.unread : 0);
+        if (data.mailbox) S.mailbox = data.mailbox;
 
         var baselined = S.baselined;
         S.baselined = true;
@@ -363,6 +443,17 @@
         return document.hidden || (document.hasFocus && !document.hasFocus());
     }
 
+    /* The CSRF token travels inside the notification, because the action buttons
+       are handled in sw.js and a worker has no document.cookie to read it from.
+       It is the token this page already holds and it is scoped to this session,
+       so nothing new is exposed by putting it there; what it buys is Archive and
+       Mark read working on a notification this page created, on every engine,
+       including the ones with no Cookie Store API in a worker. */
+    function csrfToken() {
+        var m = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]+)/);
+        return m ? decodeURIComponent(m[1]) : '';
+    }
+
     function announce(newest) {
         if (!canNotify() || !unattended()) return;
 
@@ -370,13 +461,30 @@
         var body = newest.subject || '(no subject)';
         var options = {
             body: body,
-            // One tag, so a quiet morning of six messages leaves one notification
-            // saying the newest rather than a stack of six.
-            tag: TAG,
+            // Tagged per message rather than with one rolling tag, so this and
+            // the push path cannot both announce the same arrival. The cap below
+            // is what stops a quiet morning turning into a stack of six.
+            tag: tagFor(newest.id),
             renotify: true,
             icon: '/icons/icon-192.png',
             badge: '/icons/icon-192.png',
-            data: { id: newest.id, url: '/mail?msg=' + encodeURIComponent(newest.id) }
+            // When the MAIL arrived, not when this poll noticed it. Up to
+            // forty-five seconds separate the two, and a laptop that was asleep
+            // makes the gap hours.
+            timestamp: Date.parse(newest.receivedAt || '') || Date.now(),
+            dir: 'auto',      // subjects arrive here in Devanagari as well as Latin
+            lang: '',         // the sender's language, which we do not know
+            actions: [
+                { action: 'archive', title: 'Archive' },
+                { action: 'read', title: 'Mark read' }
+            ],
+            data: {
+                v: 1, lane: 'A', kind: 'mail',
+                id: newest.id,
+                mailbox: S.mailbox || '',
+                url: '/mail?msg=' + encodeURIComponent(newest.id),
+                csrf: csrfToken()
+            }
         };
 
         // Through the service worker wherever there is one, because that is the
@@ -385,7 +493,18 @@
         // browser has since discarded.
         if (navigator.serviceWorker && navigator.serviceWorker.ready) {
             navigator.serviceWorker.ready.then(function (reg) {
-                return reg.showNotification(title, options);
+                if (!reg.getNotifications) return reg.showNotification(title, options);
+                return reg.getNotifications().then(function (open) {
+                    var mine = open.filter(function (n) {
+                        return n.tag && n.tag.indexOf('jm-a:') === 0;
+                    });
+                    // Oldest first out of the way, so what stays on screen is the
+                    // three most recent rather than the three that got there first.
+                    for (var i = 0; i <= mine.length - PAGE_MAX; i++) {
+                        try { mine[i].close(); } catch (e) { /* already gone */ }
+                    }
+                    return reg.showNotification(title, options);
+                });
             }).catch(function () { plainNotification(title, options); });
             return;
         }
@@ -417,8 +536,44 @@
      * public statement that it has stopped loading, which is why it is the thing
      * waited on rather than any internal of that file.
      */
-    function open(id) {
+    /**
+     * Whether the composer is open with something in it.
+     *
+     * Read off the page's own markup rather than any internal of mail.js, for
+     * the reason the header comment gives: #composeSheet.open is how that screen
+     * states it is showing the composer, and #cTo, #cSubject and #cEditor are
+     * ids with label[for] pointing at them, so they are public in the same sense
+     * window.openMessage is. If any of it were ever renamed this returns false
+     * and the behaviour degrades to what it was before, which is the safe
+     * direction for a guess to be wrong in.
+     */
+    function composerDirty() {
+        var sheet = document.getElementById('composeSheet');
+        if (!sheet || !sheet.classList || !sheet.classList.contains('open')) return false;
+        var editor = document.getElementById('cEditor');
+        if (editor && editor.textContent && editor.textContent.trim()) return true;
+        var subject = document.getElementById('cSubject');
+        if (subject && subject.value && subject.value.trim()) return true;
+        var to = document.getElementById('cTo');
+        if (to && to.value && to.value.trim()) return true;
+        // A committed address is a chip and no longer in the input, so an
+        // otherwise blank composer addressed to three people is still dirty.
+        return sheet.querySelectorAll('.chip').length > 0;
+    }
+
+    function open(id, guarded) {
         if (!id) return;
+
+        /* A notification click never destroys typed text.
+         *
+         * Every other state in this file optimises for getting the person to the
+         * message. This one does not. Opening a message closes the composer, and
+         * a composer closed by a background event takes whatever was in it with
+         * it. Losing text somebody typed to something they did not do is the
+         * failure people never report and never forgive; they simply stop
+         * trusting the app. So the id is parked and the person is asked. */
+        if (guarded && composerDirty()) { offerOpen(id); return; }
+
         var waited = 0;
         (function attempt() {
             var list = document.getElementById('list');
@@ -438,7 +593,25 @@
         if (!navigator.serviceWorker) return;
         navigator.serviceWorker.addEventListener('message', function (event) {
             var msg = event.data;
-            if (msg && msg.type === 'jm-open-mail' && msg.id) open(msg.id);
+            if (!msg) return;
+
+            if (msg.type === 'jm-open-mail' && msg.id) { open(msg.id, msg.guarded); return; }
+
+            /* A push arrived. The badge is the one thing push carries no number
+               for, so this is where the poll is re-run: on the event rather than
+               on the clock, which is what lets the timer stand down to fifteen
+               minutes without the count going stale. */
+            if (msg.type === 'jm-push-refresh') { schedule(0); return; }
+
+            /* sw.js asking for the CSRF token, because it has no document and
+               the engine it is running on has no Cookie Store API in a worker.
+               Answered on the port the worker transferred, so nothing is
+               broadcast and nothing is kept. */
+            if (msg.type === 'jm-csrf') {
+                var port = event.ports && event.ports[0];
+                if (port) { try { port.postMessage({ csrf: csrfToken() }); } catch (e) { /* closed */ } }
+                return;
+            }
         });
     }
 
@@ -563,6 +736,72 @@
 
     var card = null;
 
+    /**
+     * Builds the promotion card the permission ask and the guarded-open prompt
+     * both use.
+     *
+     * Extracted rather than duplicated, because the second card has to look
+     * exactly like the first one: two cards from the same application that sit
+     * in the same corner and disagree about their padding read as a bug even
+     * when neither is. Layer 100 and the rest of the styling are unchanged; see
+     * css() above and section 15 of the UI spec.
+     */
+    function buildCard(spec) {
+        css();
+        var el = document.createElement('div');
+        el.id = 'jmNotify';
+        el.setAttribute('role', 'dialog');
+        el.setAttribute('aria-label', spec.label || spec.title);
+        el.style.position = 'fixed';
+
+        var ico = document.createElement('span');
+        ico.className = 'jn-ico';
+        ico.appendChild(icon(spec.icon));
+        el.appendChild(ico);
+
+        var col = document.createElement('div');
+        col.className = 'jn-c';
+
+        var h = document.createElement('p');
+        h.className = 'jn-t';
+        h.textContent = spec.title;
+        col.appendChild(h);
+
+        var p = document.createElement('p');
+        p.className = 'jn-s';
+        p.textContent = spec.text;
+        col.appendChild(p);
+
+        var acts = document.createElement('div');
+        acts.className = 'jn-a';
+        (spec.buttons || []).forEach(function (b) {
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            if (b.primary) btn.className = 'jn-p';
+            btn.textContent = b.label;
+            btn.addEventListener('click', b.onClick);
+            acts.appendChild(btn);
+        });
+        col.appendChild(acts);
+        el.appendChild(col);
+
+        var x = document.createElement('button');
+        x.className = 'jn-x';
+        x.type = 'button';
+        x.setAttribute('aria-label', spec.dismissLabel || 'Close');
+        x.appendChild(icon('i-close'));
+        x.addEventListener('click', function () {
+            if (spec.onDismiss) spec.onDismiss();
+            closeCard();
+        });
+        el.appendChild(x);
+
+        document.body.appendChild(el);
+        card = el;
+        requestAnimationFrame(function () { el.classList.add('on'); });
+        return el;
+    }
+
     function closeCard() {
         if (!card) return;
         var gone = card;
@@ -583,7 +822,8 @@
      * answer is obviously yes: something just came in while the person had this
      * open. The browser's own prompt is still not raised here. It is raised by the
      * button below, inside the click, because Chrome and Firefox both require a
-     * user gesture and both ignore a request made without one.
+     * user gesture and both ignore a request made without one. Push subscribes
+     * from inside that same gesture's promise; there is not a second ask anywhere.
      */
     function offerPermission() {
         if (card || !askable()) return;
@@ -591,79 +831,411 @@
         // there first; this one waits for the next arrival.
         if (document.getElementById('jmInstall')) return;
 
-        css();
-        card = document.createElement('div');
-        card.id = 'jmNotify';
-        card.setAttribute('role', 'dialog');
-        card.setAttribute('aria-label', 'Notify me about new mail');
-        card.style.position = 'fixed';
+        /* iOS in a Safari tab has no PushManager at all, and it does not appear
+         * when permission is granted; it appears when the site is opened from the
+         * Home Screen. That has been true since Web Push landed in iOS 16.4 and
+         * neither Declarative Web Push in 18.4 nor the standalone-by-default
+         * change in iOS 26 altered it.
+         *
+         * So on that platform this card must not be a switch. A switch that
+         * appears to work, is tapped, and then never produces a notification is
+         * the single worst outcome available here: the person concludes the
+         * feature is broken and never comes back to it. It becomes an
+         * instruction instead, and the poll keeps doing what it can, which is
+         * stated rather than implied. */
+        if (needsInstall()) {
+            buildCard({
+                icon: 'i-share-ios',
+                title: 'Notifications need Jarurat Mail on your Home Screen',
+                label: 'How to turn on notifications on iPhone',
+                text: 'Tap Share, then Add to Home Screen, then open Jarurat Mail '
+                    + 'from there and turn this on. Safari cannot show notifications '
+                    + 'from a tab. While this tab is open, new mail still updates '
+                    + 'the count on the icon.',
+                dismissLabel: 'Not now',
+                onDismiss: snoozeAsk,
+                buttons: [
+                    { label: 'Got it', primary: true, onClick: function () { snoozeAsk(); closeCard(); } }
+                ]
+            });
+            return;
+        }
 
-        var ico = document.createElement('span');
-        ico.className = 'jn-ico';
-        ico.appendChild(icon('i-bell'));
-        card.appendChild(ico);
-
-        var col = document.createElement('div');
-        col.className = 'jn-c';
-
-        var h = document.createElement('p');
-        h.className = 'jn-t';
-        h.textContent = 'Tell me when mail arrives';
-        col.appendChild(h);
-
-        var p = document.createElement('p');
-        p.className = 'jn-s';
-        p.textContent = 'A message just came in while this tab was open. '
-            + 'Jarurat Mail can show a desktop notification next time. '
-            + 'It only works while the mailbox is open in a tab.';
-        col.appendChild(p);
-
-        var acts = document.createElement('div');
-        acts.className = 'jn-a';
-
-        var yes = document.createElement('button');
-        yes.className = 'jn-p';
-        yes.type = 'button';
-        yes.textContent = 'Turn on';
-        yes.addEventListener('click', function () {
-            closeCard();
-            snoozeAsk();
-            request();
+        buildCard({
+            icon: 'i-bell',
+            title: 'Tell you when someone replies?',
+            label: 'Notify me about new mail',
+            /* The volume limit and the quiet hours are stated BEFORE the button,
+               because the fear that drives a refusal is being interrupted all
+               evening, and answering it after the button is answering it too
+               late. Everything this sentence promises is enforced in sw.js: the
+               sound floor, the silent lane, and the fact that most mail never
+               makes a noise at all. */
+            text: 'We will notify you when someone writes to you directly or replies '
+                + 'to a thread you are in. Everything else arrives quietly. '
+                + (S.push.supported
+                    ? 'This works with the app shut.'
+                    : 'This works while the mailbox is open in a tab.'),
+            dismissLabel: 'Not now',
+            onDismiss: snoozeAsk,
+            buttons: [
+                {
+                    label: 'Yes, notify me', primary: true, onClick: function () {
+                        closeCard();
+                        snoozeAsk();
+                        request();
+                    }
+                },
+                { label: 'Not now', onClick: function () { snoozeAsk(); closeCard(); } }
+            ]
         });
-        acts.appendChild(yes);
+    }
 
-        var no = document.createElement('button');
-        no.type = 'button';
-        no.textContent = 'Not now';
-        no.addEventListener('click', function () { snoozeAsk(); closeCard(); });
-        acts.appendChild(no);
+    /**
+     * The guarded-open prompt from a notification click with a dirty composer.
+     *
+     * This deliberately does not save the draft first and then navigate. Saving
+     * would mean this file POSTing a compose payload it does not own the shape
+     * of, from a background event, and getting that wrong loses exactly the text
+     * it exists to protect. Asking costs one tap and cannot lose anything, so
+     * asking is what it does. The message is parked, not dropped: whichever
+     * answer the person gives, nothing types itself over their letter.
+     */
+    function offerOpen(id) {
+        if (card) closeCard();
+        buildCard({
+            icon: 'i-mail',
+            title: 'Open the new message?',
+            label: 'Open the message a notification was about',
+            text: 'You have a message half written. Opening this one closes the '
+                + 'composer, so nothing is opened until you say so.',
+            dismissLabel: 'Keep writing',
+            buttons: [
+                {
+                    label: 'Open it', primary: true, onClick: function () {
+                        closeCard();
+                        open(id);
+                    }
+                },
+                { label: 'Keep writing', onClick: function () { closeCard(); } }
+            ]
+        });
+    }
 
-        col.appendChild(acts);
-        card.appendChild(col);
 
-        var x = document.createElement('button');
-        x.className = 'jn-x';
-        x.type = 'button';
-        x.setAttribute('aria-label', 'Not now');
-        x.appendChild(icon('i-close'));
-        x.addEventListener('click', function () { snoozeAsk(); closeCard(); });
-        card.appendChild(x);
+    /* ====================================================================
+       Web Push.
 
-        document.body.appendChild(card);
-        var mine = card;
-        requestAnimationFrame(function () { mine.classList.add('on'); });
+       The division of labour, because it is not obvious from either file:
+       this half asks, subscribes, and hands the subscription to the server.
+       The server registers that same subscription with Stalwart as a JMAP
+       PushSubscription. Stalwart encrypts and posts to Apple or Google when
+       mail arrives. sw.js renders what comes out. Nothing in this file ever
+       sees a key, a password or a payload.
+       ==================================================================== */
+
+    /** iPadOS 13 and later report themselves as a Mac, so touch points are the tell. */
+    function isIos() {
+        var ua = navigator.userAgent;
+        return /iPad|iPhone|iPod/.test(ua)
+            || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    }
+
+    function standalone() {
+        return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+            || (window.matchMedia && window.matchMedia('(display-mode: fullscreen)').matches)
+            || window.navigator.standalone === true;
+    }
+
+    /**
+     * True on the one platform where the answer to "can this device receive a
+     * notification" is not yes or no but "not until you install it".
+     *
+     * On iOS, PushManager is simply absent from a Safari tab. It is not a
+     * permission that can be granted and it is not a capability that can be
+     * polyfilled; the site has to be on the Home Screen and opened from there.
+     * Checking for the missing PushManager as well as for iOS means a future
+     * iOS that lifts the restriction stops showing the instruction on its own.
+     */
+    function needsInstall() {
+        return isIos() && !standalone() && !('PushManager' in window);
+    }
+
+    /** Stable per browser profile, generated once, never sent anywhere else. */
+    function deviceId() {
+        var id = null;
+        try { id = localStorage.getItem(DEVICE_KEY); } catch (e) { /* private mode */ }
+        if (id) return id;
+        if (window.crypto && crypto.randomUUID) id = crypto.randomUUID();
+        else id = 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+        try { localStorage.setItem(DEVICE_KEY, id); } catch (e) { /* kept for this page only */ }
+        return id;
+    }
+
+    /* subscribe() wants the raw 65-byte uncompressed P-256 point, not the
+       base64url string the session document carries it as, and it rejects the
+       string without saying why. Padding is restored first because atob refuses
+       an unpadded input, which is the form the JMAP capability uses. */
+    function keyBytes(b64) {
+        var pad = '='.repeat((4 - (b64.length % 4)) % 4);
+        var raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+        var out = new Uint8Array(raw.length);
+        for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+        return out;
+    }
+
+    /** Keeps sw.js told who this device is; it has no page to ask when a push lands. */
+    function tellWorker(extra) {
+        if (!navigator.serviceWorker || !navigator.serviceWorker.controller) return;
+        var msg = {
+            type: 'jm-push-state',
+            deviceClientId: deviceId(),
+            mailbox: S.mailbox || '',
+            applicationServerKey: S.push.key || ''
+        };
+        if (extra) for (var k in extra) if (extra.hasOwnProperty(k)) msg[k] = extra[k];
+        try { navigator.serviceWorker.controller.postMessage(msg); } catch (e) { /* gone */ }
+    }
+
+    /**
+     * Asks the server what push can do here.
+     *
+     * Every failure answers the same way, with supported false: a 404 because
+     * the server half is not deployed yet, a 409 because the mailbox is locked,
+     * a 500, or no network at all. There is no state in which this file is
+     * allowed to offer a switch it cannot honour, and the poll keeps working in
+     * all of them, so failing closed costs nothing.
+     */
+    function loadPushConfig() {
+        if (!('PushManager' in window) || !navigator.serviceWorker) {
+            S.push.checked = true;
+            return Promise.resolve(S.push);
+        }
+        /* The device id goes on the query string, and leaving it off is not a
+           small omission: the endpoint answers about one device, so without it
+           every answer comes back state "off" with no pushSeen, this file
+           concludes push has never worked, and the poll never stands down even
+           for somebody whose notifications are arriving perfectly. */
+        return fetch(PUSH_CONFIG_URL + '?deviceClientId=' + encodeURIComponent(deviceId()), {
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers: { 'Accept': 'application/json' }
+        }).then(function (res) {
+            if (!res.ok) return null;
+            return res.json();
+        }).then(function (cfg) {
+            S.push.checked = true;
+            if (!cfg || !cfg.supported || !cfg.applicationServerKey) return S.push;
+            S.push.supported = true;
+            S.push.key = cfg.applicationServerKey;
+            S.push.emailPush = !!cfg.emailPush;
+            S.push.state = cfg.state || 'off';
+            S.push.seen = !!cfg.pushSeen;
+            S.push.expiresAt = cfg.expiresAt || null;
+            return S.push;
+        }).catch(function () {
+            S.push.checked = true;
+            return S.push;
+        });
+    }
+
+    /**
+     * Creates or repairs the browser's push subscription and hands it over.
+     *
+     * Called from inside the permission gesture's promise on the first run, and
+     * with no gesture at all on every later page load, which is correct and not
+     * an oversight: a gesture is required to ASK for permission, never to use a
+     * permission already granted. Without the second path a person who granted
+     * last week and then had their subscription rotated would never get one
+     * back, and nothing on screen would say so.
+     *
+     * The existing subscription is reused rather than replaced when its
+     * applicationServerKey still matches the server's. Replacing it would change
+     * the endpoint, and every endpoint change costs a round trip to Apple or
+     * Google and a new row the server has to reconcile.
+     */
+    function subscribePush() {
+        if (!S.push.supported || !S.push.key) return Promise.resolve(false);
+        if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {
+            return Promise.resolve(false);
+        }
+        if (!navigator.serviceWorker || !('PushManager' in window)) return Promise.resolve(false);
+
+        var wanted;
+        try { wanted = keyBytes(S.push.key); } catch (e) { return Promise.resolve(false); }
+
+        return navigator.serviceWorker.ready.then(function (reg) {
+            return reg.pushManager.getSubscription().then(function (existing) {
+                if (!existing) {
+                    return reg.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: wanted
+                    });
+                }
+                var had = existing.options && existing.options.applicationServerKey;
+                var same = had && new Uint8Array(had).length === wanted.length
+                    && new Uint8Array(had).every(function (b, i) { return b === wanted[i]; });
+                if (same) return existing;
+                // The server rotated its VAPID key, so this subscription can
+                // never be delivered to again and keeping it would be keeping a
+                // dead endpoint that looks alive.
+                return existing.unsubscribe().catch(function () { return null; }).then(function () {
+                    return reg.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: wanted
+                    });
+                });
+            });
+        }).then(function (sub) {
+            if (!sub) return false;
+            var json = sub.toJSON();
+            S.push.endpoint = json.endpoint;
+            tellWorker();
+            return fetch(PUSH_SUBSCRIBE_URL, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-XSRF-TOKEN': csrfToken()
+                },
+                body: JSON.stringify({
+                    deviceClientId: deviceId(),
+                    endpoint: json.endpoint,
+                    keys: json.keys
+                })
+            }).then(function (res) {
+                if (!res.ok) return false;
+                return res.json().catch(function () { return null; });
+            }).then(function (cfg) {
+                if (cfg) {
+                    S.push.state = cfg.state || S.push.state;
+                    S.push.seen = !!cfg.pushSeen;
+                    S.push.expiresAt = cfg.expiresAt || S.push.expiresAt;
+                }
+                tellWorker({ pushSeen: S.push.seen });
+                // The interval changes the moment a push has been proved, so the
+                // timer is re-armed rather than left to expire at the old rate.
+                schedule(interval());
+                return true;
+            });
+        }).catch(function () {
+            // A refused subscribe, an unreachable server, a worker that never
+            // became ready. The poll is untouched by all of it and the person
+            // sees the badge exactly as before.
+            return false;
+        });
+    }
+
+    /**
+     * Takes this device's subscription away, at both ends.
+     *
+     * Exported rather than wired to stop(). stop() runs when the console session
+     * dies, which happens on its own after eight hours of inactivity, and pushing
+     * a person off notifications because they went home for the night would be a
+     * feature that switches itself off. Turning it off is a decision, so it needs
+     * somebody to make it: a settings row calls this.
+     */
+    function disablePush() {
+        var id = deviceId();
+        var done = fetch(PUSH_SUBSCRIBE_URL, {
+            method: 'DELETE',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-XSRF-TOKEN': csrfToken()
+            },
+            body: JSON.stringify({ deviceClientId: id })
+        }).catch(function () { /* the row expires on its own within seven days */ });
+
+        return done.then(function () {
+            if (!navigator.serviceWorker || !('PushManager' in window)) return false;
+            return navigator.serviceWorker.ready.then(function (reg) {
+                return reg.pushManager.getSubscription();
+            }).then(function (sub) {
+                // The browser's own subscription goes too. Leaving it behind means
+                // the push service keeps a live endpoint for a device the server has
+                // forgotten, and the next subscribe would get a different endpoint
+                // while the old one sat there being delivered to by nothing.
+                return sub ? sub.unsubscribe() : false;
+            }).catch(function () { return false; });
+        }).then(function (gone) {
+            S.push.endpoint = null;
+            S.push.seen = false;
+            S.push.state = 'off';
+            tellWorker({ pushSeen: false });
+            schedule(interval());     // straight back to the full-rate poll
+            return gone;
+        });
+    }
+
+    /**
+     * Notices a permission changed outside this page.
+     *
+     * Somebody who denied once, was told to go into browser settings, and did
+     * it, comes back to a tab that still believes it is denied. Without this
+     * they turn the switch on, nothing happens, and they conclude the app is
+     * broken, which is the commonest way a recovery instruction fails. Three
+     * lines, and it closes that loop before they have finished putting the
+     * phone down.
+     */
+    function watchPermission() {
+        if (!navigator.permissions || !navigator.permissions.query) return;
+        try {
+            navigator.permissions.query({ name: 'notifications' }).then(function (status) {
+                status.onchange = function () {
+                    if (status.state === 'granted') subscribePush();
+                    if (status.state === 'denied') {
+                        S.push.endpoint = null;
+                        schedule(interval());
+                    }
+                };
+            }).catch(function () { /* the query name is not recognised here */ });
+        } catch (e) { /* older Safari */ }
+    }
+
+    /**
+     * The whole push bootstrap, run once per page load.
+     *
+     * Ordered so that nothing asks for anything: the config call is a GET, and
+     * subscribePush only proceeds on a permission that already exists. A person
+     * who has never granted anything sees exactly the same page they saw before
+     * this feature existed.
+     */
+    function bootPush() {
+        loadPushConfig().then(function () {
+            if (!S.push.supported) return;
+            tellWorker({ pushSeen: S.push.seen });
+            if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                subscribePush();
+            }
+        });
+        watchPermission();
     }
 
     /**
      * Raises the browser's own permission prompt. Must be called from inside a
      * click handler or the browsers that require a gesture drop it on the floor,
      * which is why this is not exported as something a timer could reach.
+     *
+     * The push subscription is made from inside this promise and never from a
+     * second button. One deliberate gesture buys both, because they are one
+     * decision as far as the person is concerned, and a second switch labelled
+     * something like "also on my phone" would be a second thing to refuse.
      */
     function request() {
         if (typeof Notification === 'undefined') return;
         try {
             var answer = Notification.requestPermission(function () { /* old callback form */ });
-            if (answer && answer.then) answer.catch(function () { /* dismissed */ });
+            if (answer && answer.then) {
+                answer.then(function (result) {
+                    if (result !== 'granted') return;
+                    if (S.push.checked) { subscribePush(); return; }
+                    // The gesture came before the config answer, which happens on
+                    // a slow first load. Waiting for it here rather than giving up
+                    // is what keeps that race from costing the whole feature.
+                    loadPushConfig().then(subscribePush);
+                }).catch(function () { /* dismissed */ });
+            }
         } catch (e) { /* not available on this origin */ }
     }
 
@@ -698,18 +1270,40 @@
             watchTitle();
             listenForClicks();
             openFromUrl();
+            bootPush();
             schedule(FIRST_MS);
         },
         /** For a sign-out path that wants the timer gone before the page unloads. */
         stop: stop,
         /** Must be called from a click. Exported so a settings row could offer it too. */
         enable: request,
+        /** Turns push off for this device, at both ends. Safe to call twice. */
+        disable: disablePush,
+        /**
+         * Everything a settings row needs to describe the true state, including
+         * the three that are not a boolean: the browser has blocked us, this
+         * iPhone needs the app installed first, and push is subscribed but has
+         * never actually delivered anything. mailsettings.js owns that row and
+         * this file does not draw one; what it can do is refuse to let that row
+         * be written from a guess.
+         */
         state: function () {
             return {
                 unread: S.unread,
                 stopped: S.stopped,
                 paused: S.paused,
-                permission: typeof Notification === 'undefined' ? 'unsupported' : Notification.permission
+                permission: typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+                pushSupported: S.push.supported,
+                pushSubscribed: !!S.push.endpoint,
+                /* Whether the mail server puts the sender and subject inside the
+                   payload or only says that something arrived. Not a failure
+                   either way, but a materially less useful notification, and the
+                   settings row should be able to say which one this is. */
+                pushCarriesContent: S.push.emailPush,
+                pushProved: pushWorking(),
+                pushExpiresAt: S.push.expiresAt,
+                installRequired: needsInstall(),
+                pollEveryMs: interval()
             };
         }
     };
