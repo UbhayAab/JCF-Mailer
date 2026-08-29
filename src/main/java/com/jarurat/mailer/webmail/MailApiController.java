@@ -9,10 +9,13 @@ import com.jarurat.mailer.mail.MailService;
 import com.jarurat.mailer.mail.MessageBody;
 import com.jarurat.mailer.mail.MessagePage;
 import com.jarurat.mailer.mail.MessageSummary;
+import com.jarurat.mailer.mail.OutboundHtml;
+import com.jarurat.mailer.mail.Outgoing;
 import com.jarurat.mailer.messagelog.MessageLogService;
 import com.jarurat.mailer.security.LoginAddress;
 import com.jarurat.mailer.security.LoginRateLimiter;
 import com.jarurat.mailer.services.AuditService;
+import com.jarurat.mailer.services.SesSender;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpSession;
 import org.springframework.beans.TypeMismatchException;
@@ -70,6 +73,13 @@ public class MailApiController {
     /** type/subtype and nothing else. Anchored by matches(), so a newline cannot hide in it. */
     private static final Pattern MIME_TYPE =
             Pattern.compile("[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,62}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,62}");
+
+    /**
+     * How much text one address field may carry. Fifty addresses at sixty characters
+     * is three thousand, so this is generous for anything a person types and small
+     * enough that a pasted spreadsheet column is refused before it is split.
+     */
+    private static final int MAX_ADDRESS_FIELD = 4000;
 
     /** Folders whose rows should show who the message went TO rather than who sent it. */
     private static final List<String> OUTGOING_ROLES = List.of("sent", "drafts");
@@ -261,6 +271,15 @@ public class MailApiController {
         out.put("sentAt", iso(body.sentAt()));
         out.put("seen", body.seen());
         out.put("flagged", body.flagged());
+        out.put("draft", body.draft());
+        // The three headers a conversation view is built from. threadId is what
+        // Stalwart has already grouped, and messageId with references is what lets a
+        // reply written here join the same group in the recipient's client. Exposing
+        // them now costs nothing and is the difference between grouping later and
+        // re-reading every message in the mailbox to backfill them.
+        out.put("messageId", nz(body.messageId()));
+        out.put("inReplyTo", body.inReplyTo());
+        out.put("references", body.references());
         out.put("bodyHtml", reader.html());
         out.put("blockedImages", reader.blockedImages());
         out.put("imagesShown", images);
@@ -365,15 +384,31 @@ public class MailApiController {
     }
 
     /**
-     * One to one send. The composer is a plain textarea, so the HTML part is built
-     * here from the typed text rather than accepted from the browser. That keeps this
-     * server out of the business of relaying markup it did not write.
+     * One to one send.
+     *
+     * The old comment here said the HTML part was built from the typed text so that
+     * this server stayed out of the business of relaying markup it did not write, and
+     * that sentence is no longer true, so it is replaced rather than left to mislead
+     * whoever reads it next. The composer can now hand over HTML it built itself. What
+     * has not changed is the trust: the browser's own cleaning counts for nothing here,
+     * because a browser is where an attacker already is. Every byte of that HTML is
+     * rebuilt by OutboundHtml.clean inside MailService before the JSON is written, so
+     * what this server relays is markup that survived our own allowlist and never
+     * markup the client asserted was safe. A request with no html parameter takes
+     * exactly the path it always took, through composeHtml, which is why every caller
+     * that predates this change still works unaltered.
      *
      * Takes an ordinary form post and a multipart one through the same method. A
      * MultipartFile array bound with required=false resolves to null when the request
-     * carries no parts at all, so every existing caller sends exactly what it sent
-     * before and gets exactly what it got before; files only exist once a browser has
-     * actually attached some. No parameter name, success body or failure body changed.
+     * carries no parts at all, so files only exist once a browser has actually
+     * attached some.
+     *
+     * replyTo carries the parent's JMAP email id and never a header value, which is
+     * the important half. In-Reply-To and References decide which conversation the
+     * recipient's client files this under, and a browser that could set them directly
+     * could staple our message into the middle of somebody else's thread. The parent
+     * is re-read from the mailbox here and the two headers are derived from what the
+     * mail server says the parent is.
      */
     @PostMapping("/send")
     @PreAuthorize("hasAuthority('MAIL_SEND')")
@@ -381,15 +416,27 @@ public class MailApiController {
                                   HttpSession session,
                                   @RequestParam String to,
                                   @RequestParam(required = false) String cc,
+                                  @RequestParam(required = false) String bcc,
                                   @RequestParam(defaultValue = "") String subject,
                                   @RequestParam(defaultValue = "") String body,
+                                  @RequestParam(required = false) String html,
+                                  @RequestParam(required = false) String replyTo,
+                                  @RequestParam(required = false) String draftId,
                                   @RequestParam(value = "files", required = false) MultipartFile[] files) {
         String user = mailbox.require(auth, session);
-        List<String> recipients = addressList(to);
-        if (recipients.isEmpty()) {
+
+        Outgoing message = compose(to, cc, bcc, subject, body, html);
+        if (message.everyRecipient().isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of("error", "Add at least one recipient."));
         }
-        List<String> copies = addressList(cc);
+
+        MessageBody parent = null;
+        if (replyTo != null && !replyTo.isBlank()) {
+            parent = mail.getMessage(user, replyTo.trim());
+            if (parent.messageId() != null && !parent.messageId().isBlank()) {
+                message = message.inThread(parent.messageId(), parent.references());
+            }
+        }
 
         // Everything that can refuse this message is decided before a single byte
         // leaves for the mail server, so a file we will not carry costs the sender
@@ -403,26 +450,163 @@ public class MailApiController {
 
         long startedAt = System.currentTimeMillis();
         List<Attachment> attached = uploadAll(user, chosen);
-        String sentId = mail.send(user, recipients, copies, subject.trim(), composeHtml(body), body, attached);
+        String sentId = mail.send(user, message.withAttachments(attached));
         long elapsed = System.currentTimeMillis() - startedAt;
+
+        // The draft the sender was working from is thrown away only after the message
+        // is on its way, so a submission that fails leaves them their text.
+        if (draftId != null && !draftId.isBlank()) {
+            try {
+                mail.deleteDraft(user, draftId.trim());
+            } catch (MailException e) {
+                // Already gone, or gone from another device. Not worth failing a send
+                // that has already been accepted by the mail server.
+            }
+        }
+
+        // $answered is what puts the reply arrow on the parent in every client that
+        // reads this mailbox, ours included, and it is set after the send rather than
+        // before because a message that was not accepted was not answered.
+        if (parent != null) {
+            try {
+                mail.setKeyword(user, parent.id(), "answered", true);
+            } catch (MailException e) {
+                // A flag that did not stick is not a reason to tell somebody their
+                // reply failed when it did not.
+            }
+        }
+
+        List<String> visible = new ArrayList<>(message.to());
+        visible.addAll(message.cc());
         // AuditLog.target is a plain 255 char column and only detail is truncated for us.
-        audit.record("MAIL_SENT", clip(user + " to " + String.join(", ", recipients)),
-                "subject " + (subject.isBlank() ? "(none)" : subject.trim())
+        audit.record("MAIL_SENT", clip(user + " to " + String.join(", ", visible)),
+                "subject " + (message.subject().isBlank() ? "(none)" : message.subject())
                         + (sentId == null ? "" : ", id " + sentId)
+                        + (message.bcc().isEmpty() ? "" : ", bcc " + String.join(", ", message.bcc()))
+                        + (message.isThreaded() ? ", in reply to " + message.inReplyTo() : "")
                         + (attached.isEmpty() ? "" : ", files " + names(attached)));
 
         // One row per address, the same shape campaign and transactional sends
         // write, so "did that one email go out" is one search whichever screen it
         // was sent from. The mail server has only accepted it at this point;
-        // StalwartDeliveryLog fills in what the receiving server said.
-        for (String recipient : recipients) logSend(user, recipient, subject, elapsed);
-        for (String recipient : copies) logSend(user, recipient, subject, elapsed);
+        // StalwartDeliveryLog fills in what the receiving server said. Blind copies
+        // get a row like anybody else, because this log is the only surviving record
+        // of who a blind copy went to once the Sent copy has no header naming them.
+        for (String recipient : message.everyRecipient()) logSend(user, recipient, subject, elapsed);
 
         return ResponseEntity.ok(Map.of(
                 "ok", true,
-                "message", "Sent to " + String.join(", ", recipients)
+                "id", nz(sentId),
+                "message", "Sent to " + String.join(", ", visible.isEmpty() ? message.bcc() : visible)
+                        + (message.bcc().isEmpty() || visible.isEmpty() ? ""
+                        : " and " + message.bcc().size() + " blind "
+                                + (message.bcc().size() == 1 ? "copy" : "copies"))
                         + (attached.isEmpty() ? "."
                         : " with " + attached.size() + (attached.size() == 1 ? " file." : " files."))));
+    }
+
+    // ------------------------------------------------------------------ drafts
+
+    /**
+     * Saves the compose sheet as it stands and answers with the id it now has.
+     *
+     * The client is expected to call this on a debounce while somebody types and to
+     * hold the returned id, passing it back on the next save so the previous version
+     * is replaced rather than accumulated. The id changes on every save, because JMAP
+     * makes an Email immutable and a replacement is genuinely a different message, so
+     * a client that keeps the first id it was given will pile up copies in Drafts.
+     * That is the one thing about this endpoint a client can get wrong, which is why
+     * it is stated here rather than left to be discovered.
+     *
+     * There is no Postgres behind it. The draft lives in the mailbox's own Drafts
+     * folder, which is what makes it appear on a laptop after being written on a
+     * phone, and in Thunderbird after being written here.
+     */
+    @PostMapping("/draft")
+    @PreAuthorize("hasAuthority('MAIL_SEND')")
+    public ResponseEntity<?> saveDraft(Authentication auth,
+                                       HttpSession session,
+                                       @RequestParam(required = false) String id,
+                                       @RequestParam(required = false) String to,
+                                       @RequestParam(required = false) String cc,
+                                       @RequestParam(required = false) String bcc,
+                                       @RequestParam(defaultValue = "") String subject,
+                                       @RequestParam(defaultValue = "") String body,
+                                       @RequestParam(required = false) String html,
+                                       @RequestParam(required = false) String replyTo) {
+        String user = mailbox.require(auth, session);
+
+        // A draft is allowed to have no recipients at all, because that is what every
+        // half written message looks like, so the emptiness check the send path
+        // applies is deliberately not applied here. A malformed one is still refused,
+        // so the sender learns about a typo while they are looking at it.
+        Outgoing message = compose(to, cc, bcc, subject, body, html);
+        if (replyTo != null && !replyTo.isBlank()) {
+            MessageBody parent = mail.getMessage(user, replyTo.trim());
+            if (parent.messageId() != null && !parent.messageId().isBlank()) {
+                message = message.inThread(parent.messageId(), parent.references());
+            }
+        }
+
+        String saved = mail.saveDraft(user, blank(id) ? null : id.trim(), message);
+        return ResponseEntity.ok(Map.of("ok", true, "id", nz(saved)));
+    }
+
+    /** Throws a draft away, for the discard button and for a send that started from one. */
+    @PostMapping("/draft/delete")
+    @PreAuthorize("hasAuthority('MAIL_SEND')")
+    public Map<String, Object> deleteDraft(Authentication auth,
+                                           HttpSession session,
+                                           @RequestParam String id) {
+        String user = mailbox.require(auth, session);
+        mail.deleteDraft(user, id);
+        audit.record("MAIL_DRAFT_DISCARDED", user, "draft " + id);
+        return Map.of("ok", true);
+    }
+
+    /**
+     * A draft, in the shape the compose sheet needs to resume it.
+     *
+     * Separate from /message because the two answer different questions. /message
+     * answers "what does this look like on a page" and returns a sanitised standalone
+     * document for the reader iframe. This answers "what was I typing" and returns
+     * editable HTML for a contenteditable. The HTML is run through the outbound
+     * allowlist on the way out as well as on the way in, which is not belt and braces:
+     * a draft in this folder may have been written by any client with the mailbox
+     * password, so what comes back off the server is somebody else's markup until
+     * proven otherwise, exactly like a message from a stranger.
+     */
+    @GetMapping("/draft")
+    @PreAuthorize("hasAuthority('MAIL_SEND')")
+    public Map<String, Object> draft(Authentication auth,
+                                     HttpSession session,
+                                     @RequestParam String id) {
+        String user = mailbox.require(auth, session);
+        MessageBody body = mail.getMessage(user, id);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", nz(body.id()));
+        out.put("draft", body.draft());
+        out.put("subject", nz(body.subject()));
+        out.put("to", addresses(body.to()));
+        out.put("cc", addresses(body.cc()));
+        out.put("bcc", addresses(body.bcc()));
+        out.put("html", OutboundHtml.clean(body.html()));
+        out.put("text", nz(body.text()));
+        out.put("inReplyTo", body.inReplyTo());
+        out.put("references", body.references());
+
+        List<Map<String, Object>> parts = new ArrayList<>();
+        for (Attachment a : body.files()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("name", nz(a.safeName()));
+            m.put("type", nz(a.type()));
+            m.put("size", a.size());
+            m.put("blobId", nz(a.blobId()));
+            parts.add(m);
+        }
+        out.put("attachments", parts);
+        return out;
     }
 
     // ------------------------------------------------------------------ attachments
@@ -611,15 +795,79 @@ public class MailApiController {
         return rows;
     }
 
-    /** Accepts the comma or semicolon separated list a person actually types. */
-    private static List<String> addressList(String raw) {
+    /**
+     * The compose sheet's three address fields and its body, turned into one message.
+     *
+     * Everything a caller can get wrong is decided here, before the mailbox is
+     * touched, so a typo costs a round trip to this server and never a round trip to
+     * Stalwart followed by an envelope error nobody can read.
+     */
+    private static Outgoing compose(String to, String cc, String bcc,
+                                    String subject, String body, String html) {
+        if (html != null && html.length() > OutboundHtml.MAX_HTML) {
+            throw new MailException(MailException.Kind.PROTOCOL,
+                    "That message is too long to send as formatted mail. Gmail hides anything past "
+                            + "about 100KB behind a link, so trim the quoted history and try again.");
+        }
+        // A caller that sends no html is the plain textarea this API was written for,
+        // and it must keep getting the HTML part this server has always built for it.
+        // Nothing about that path changes, which is why the composer can be replaced
+        // without a flag day and why every test that predates the editor still passes.
+        String markup = html == null || html.isBlank() ? composeHtml(body) : html;
+        Outgoing message = new Outgoing(
+                parseRecipients("To", to), parseRecipients("Cc", cc), parseRecipients("Bcc", bcc),
+                subject == null ? "" : subject.trim(), markup, body, List.of(), null, List.of());
+
+        int named = message.everyRecipient().size();
+        if (named > Outgoing.MAX_RECIPIENTS) {
+            throw new MailException(MailException.Kind.PROTOCOL,
+                    "That message names " + named + " recipients and one message may carry "
+                            + Outgoing.MAX_RECIPIENTS + ". Send a list this size from Campaign Studio, "
+                            + "which throttles it and records what happened to each address.");
+        }
+        return message;
+    }
+
+    /**
+     * One address field, split the way a person types it and checked one entry at a
+     * time.
+     *
+     * The failure names the field and the exact text that failed, because "invalid
+     * recipient" against a line of eleven addresses is a message that makes somebody
+     * read all eleven. Pasting out of another mail client brings the display name
+     * along, so "Priya Sharma &lt;priya@jarurat.care&gt;" is normalised rather than
+     * refused; refusing it would train people to retype addresses by hand, which is
+     * how a wrong address reaches a donor.
+     */
+    private static List<String> parseRecipients(String label, String raw) {
         List<String> out = new ArrayList<>();
         if (raw == null || raw.isBlank()) return out;
-        for (String part : raw.split("[,;]")) {
-            String v = part.trim();
-            if (!v.isEmpty() && !out.contains(v)) out.add(v);
+        if (raw.length() > MAX_ADDRESS_FIELD) {
+            throw new MailException(MailException.Kind.PROTOCOL,
+                    label + " is longer than this form accepts. Send a list that size from Campaign Studio.");
+        }
+        for (String part : raw.split("[,;\n]")) {
+            String typed = part.trim();
+            if (typed.isEmpty()) continue;
+            String address = Outgoing.normalise(typed);
+            if (address == null || !SesSender.EMAIL_OK.matcher(address).matches()) {
+                throw new MailException(MailException.Kind.PROTOCOL,
+                        label + ": \"" + clip(typed) + "\" is not an email address.");
+            }
+            boolean already = false;
+            for (String seen : out) {
+                if (seen.equalsIgnoreCase(address)) {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already) out.add(address);
         }
         return out;
+    }
+
+    private static boolean blank(String s) {
+        return s == null || s.isBlank();
     }
 
     /** Typed text to a plain HTML part: escaped, blank lines become paragraphs. */

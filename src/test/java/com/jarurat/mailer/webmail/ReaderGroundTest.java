@@ -33,18 +33,19 @@ class ReaderGroundTest {
             """;
 
     @Test
-    void senderHtmlIsRenderedOnWhiteEvenWhenTheAppAsksForDark() {
+    void senderHtmlReadsOnTheDarkGroundWithItsColoursLifted() {
         String doc = MailHtmlSanitizer
                 .toReaderDocument(NEWSLETTER, null, false, "dark").html();
 
         // The sender's own colours must survive, because stripping them mangles every
         // newsletter and every signature. What changes is the ground under them.
-        assertThat(doc).contains("#333333");
-        // Asserted on the painted ground rather than on a custom property, because the
-        // property was exactly what a sender could redefine from their own stylesheet.
-        assertThat(doc).contains("body{background:#ffffff");
-        assertThat(doc).doesNotContain("body{background:#202020");
-        assertThat(doc).contains("color-scheme:light");
+        // Rendering the message on white was the first answer, and it is what Gmail
+        // does, but a white slab inside a dark application is jarring. The ground now
+        // stays dark and the colours the sender chose against white are re-tuned.
+        assertThat(doc).contains("body{background:#202020");
+        assertThat(doc).contains("color-scheme:dark");
+        // The near-black body colour cannot survive as written or it is invisible.
+        assertThat(doc).doesNotContain("#333333");
     }
 
     /** The same must hold for "auto", which follows the reader's operating system. */
@@ -53,7 +54,7 @@ class ReaderGroundTest {
         String doc = MailHtmlSanitizer
                 .toReaderDocument(NEWSLETTER, null, false, "auto").html();
 
-        assertThat(doc).contains("body{background:#ffffff");
+        assertThat(doc).contains("body{background:#202020");
         // No prefers-color-scheme anywhere, ours or the sender's. color-scheme pins what
         // the frame may render but does NOT stop it answering the media query, so a
         // sender's dark-mode block still fired against our forced white ground and
@@ -103,7 +104,10 @@ class ReaderGroundTest {
                 """;
         String doc = MailHtmlSanitizer.toReaderDocument(builderOutput, null, false, "dark").html();
 
-        assertThat(doc).contains("#222222").contains("#333333");
+        // The light-branch colours are what survive, lifted for the dark ground, so
+        // the assertion is that the dark-branch ones are absent rather than that the
+        // originals are present unchanged.
+        assertThat(doc).doesNotContain("#222222").doesNotContain("#333333");
         assertThat(doc).doesNotContain("#e8e8e8");          // the dark branch is gone
         assertThat(doc).contains("font-weight:600");        // the light branch still fires
         assertThat(doc).doesNotContain("prefers-color-scheme");
@@ -123,7 +127,7 @@ class ReaderGroundTest {
                 """;
         String doc = MailHtmlSanitizer.toReaderDocument(hijack, null, false, "dark").html();
 
-        assertThat(doc).contains("body{background:#ffffff");
+        assertThat(doc).contains("body{background:#202020");
         assertThat(doc).doesNotContain("body{background:var(");
     }
 

@@ -144,23 +144,30 @@ public final class MailHtmlSanitizer {
      * wrap it in a standalone document ready to hand to an iframe's srcdoc property.
      */
     public static Result toReaderDocument(String html, String text, boolean allowRemoteImages, String theme) {
+        // "original" is the escape hatch: render the message exactly as the sender
+        // built it, on white, with no colour re-tuning at all. Everything else reads on
+        // the dark shell, because a white slab inside a dark application is jarring and
+        // the lifting below is what makes that safe. See liftForDarkGround.
+        boolean showOriginal = "original".equalsIgnoreCase(theme) || "light".equalsIgnoreCase(theme);
+        boolean dark = !showOriginal;
+
         Result body;
-        boolean senderAuthoredHtml;
         if (html != null && !html.isBlank()) {
-            body = sanitize(html, allowRemoteImages);
-            senderAuthoredHtml = true;
+            body = sanitize(html, allowRemoteImages, dark);
         } else {
             body = new Result(plainTextToHtml(text), 0);
-            senderAuthoredHtml = false;
         }
-        // The theme the app asks for is only honoured for a body we generated
-        // ourselves. See wrapDocument for why sender HTML never gets a dark ground.
-        String effective = senderAuthoredHtml ? "light" : theme;
-        return new Result(wrapDocument(body.html(), allowRemoteImages, effective), body.blockedImages());
+        return new Result(wrapDocument(body.html(), allowRemoteImages, dark ? "dark" : "light"),
+                body.blockedImages());
     }
 
     /** Sanitises a fragment. The result is a fragment, not a document. */
     public static Result sanitize(String rawHtml, boolean allowRemoteImages) {
+        return sanitize(rawHtml, allowRemoteImages, false);
+    }
+
+    /** @param darkGround see liftForDarkGround. */
+    public static Result sanitize(String rawHtml, boolean allowRemoteImages, boolean darkGround) {
         if (rawHtml == null || rawHtml.isBlank()) return new Result("", 0);
 
         String src = rawHtml.length() > MAX_INPUT ? rawHtml.substring(0, MAX_INPUT) : rawHtml;
@@ -214,7 +221,7 @@ public final class MailHtmlSanitizer {
 
             if ("style".equals(name)) {
                 int[] span = rawTextSpan(src, i, "style");
-                String css = sanitizeStylesheet(src.substring(i, span[0]), allowRemoteImages);
+                String css = sanitizeStylesheet(src.substring(i, span[0]), allowRemoteImages, darkGround);
                 if (!css.isEmpty()) out.append("<style>").append(css).append("</style>");
                 i = span[1];
                 continue;
@@ -236,7 +243,7 @@ public final class MailHtmlSanitizer {
             if (open.size() >= MAX_DEPTH) continue;
 
             out.append('<').append(name);
-            writeAttributes(name, tag.attrs, allowRemoteImages, out, blocked);
+            writeAttributes(name, tag.attrs, allowRemoteImages, out, blocked, darkGround);
             out.append('>');
             if (!VOID.contains(name)) {
                 if (tag.selfClosing) out.append("</").append(name).append('>');
@@ -414,7 +421,8 @@ public final class MailHtmlSanitizer {
     // ------------------------------------------------------------------ attributes
 
     private static void writeAttributes(String tag, Map<String, String> attrs,
-                                        boolean allowRemoteImages, StringBuilder out, int[] blocked) {
+                                        boolean allowRemoteImages, StringBuilder out, int[] blocked,
+                                        boolean darkGround) {
         Set<String> extra = EXTRA_ATTRS.getOrDefault(tag, Set.of());
         boolean anchorHasHref = false;
         boolean imageWithheld = false;
@@ -431,9 +439,18 @@ public final class MailHtmlSanitizer {
             }
             if (!GLOBAL_ATTRS.contains(key) && !extra.contains(key)) continue;
 
+            // The presentational colour attributes predate CSS and are still what a
+            // great many newsletters use, so they need the same lift as a style rule or
+            // half a message reads and the other half does not. An element carrying its
+            // own bgcolor has chosen a pairing and is left alone, exactly as in
+            // sanitizeDeclarations.
+            if (darkGround && "color".equals(key) && !attrs.containsKey("bgcolor")) {
+                raw = liftForDarkGround("color:" + raw).substring("color:".length());
+            }
+
             switch (key) {
                 case "style" -> {
-                    String css = sanitizeDeclarations(raw, allowRemoteImages);
+                    String css = sanitizeDeclarations(raw, allowRemoteImages, darkGround);
                     if (!css.isEmpty()) {
                         out.append(" style=\"");
                         escapeAttr(css, out);
@@ -620,12 +637,36 @@ public final class MailHtmlSanitizer {
 
     /** Sanitises the contents of a style attribute, declaration by declaration. */
     static String sanitizeDeclarations(String raw, boolean allowRemoteImages) {
+        return sanitizeDeclarations(raw, allowRemoteImages, false);
+    }
+
+    /**
+     * @param darkGround the reader is painting this message on the dark shell, so a
+     *                   colour the sender chose against white has to be re-tuned or it
+     *                   lands as near-black on near-black.
+     */
+    static String sanitizeDeclarations(String raw, boolean allowRemoteImages, boolean darkGround) {
         if (raw == null || raw.isBlank()) return "";
         String css = prepareCss(raw);
         if (css.isEmpty()) return "";
 
+        List<String> decls = splitDeclarations(css);
+
+        // Whether this same rule paints its own ground. If it does, the sender has
+        // chosen a pairing and it is left completely alone: a branded header block
+        // with white text on its own dark panel is correct as written, and "fixing"
+        // its text colour is what breaks those messages.
+        boolean bringsOwnGround = false;
+        for (String decl : decls) {
+            String p = propertyOf(decl);
+            if (("background".equals(p) || "background-color".equals(p)) && !isTransparent(decl)) {
+                bringsOwnGround = true;
+                break;
+            }
+        }
+
         StringBuilder out = new StringBuilder(css.length());
-        for (String decl : splitDeclarations(css)) {
+        for (String decl : decls) {
             String d = decl.trim();
             if (d.isEmpty()) continue;
             int colon = d.indexOf(':');
@@ -635,10 +676,105 @@ public final class MailHtmlSanitizer {
             if (isPoisonedCss(d)) continue;
             String cleaned = filterCssUrls(d, allowRemoteImages);
             if (cleaned == null) continue;
+            if (darkGround && !bringsOwnGround && ("color".equals(prop) || "border-color".equals(prop))) {
+                cleaned = liftForDarkGround(cleaned);
+            }
             if (out.length() > 0) out.append(';');
             out.append(cleaned);
         }
         return out.toString();
+    }
+
+    private static String propertyOf(String decl) {
+        int colon = decl.indexOf(':');
+        return colon <= 0 ? "" : decl.substring(0, colon).trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean isTransparent(String decl) {
+        String v = decl.substring(decl.indexOf(':') + 1).trim().toLowerCase(Locale.ROOT);
+        return v.isEmpty() || v.contains("transparent") || v.startsWith("none")
+                || v.matches(".*rgba\\([^)]*,\\s*0(\\.0+)?\\s*\\).*");
+    }
+
+    private static final Pattern CSS_HEX = Pattern.compile("#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})\\b");
+    private static final Pattern CSS_RGB =
+            Pattern.compile("rgba?\\(\\s*(\\d{1,3})\\s*,\\s*(\\d{1,3})\\s*,\\s*(\\d{1,3})\\s*(?:,[^)]*)?\\)");
+
+    /**
+     * Re-tunes one colour so it stays legible on the dark reading surface.
+     *
+     * The sender picked this colour against white, because that is what mail clients
+     * have always shown, and almost every HTML mail sets a dark text colour and no
+     * background at all. Rendering the message on white was the obvious way out and it
+     * is what Gmail does, but a white slab inside a dark application is jarring and it
+     * is not what was asked for here.
+     *
+     * So the hue the sender chose is kept and only its lightness is flipped, which is
+     * what Outlook's dark mode does. A near-black body colour becomes a near-white one,
+     * a mid grey becomes a lighter grey, and a brand colour stays recognisably itself.
+     * Anything already light enough to read on the dark ground is left untouched, so a
+     * sender who wrote for dark is not inverted back into being unreadable.
+     */
+    static String liftForDarkGround(String decl) {
+        Matcher hex = CSS_HEX.matcher(decl);
+        StringBuilder sb = new StringBuilder();
+        while (hex.find()) {
+            String h = hex.group(1);
+            if (h.length() == 3) {
+                h = "" + h.charAt(0) + h.charAt(0) + h.charAt(1) + h.charAt(1) + h.charAt(2) + h.charAt(2);
+            }
+            int r = Integer.parseInt(h.substring(0, 2), 16);
+            int g = Integer.parseInt(h.substring(2, 4), 16);
+            int b = Integer.parseInt(h.substring(4, 6), 16);
+            hex.appendReplacement(sb, Matcher.quoteReplacement(lift(r, g, b)));
+        }
+        hex.appendTail(sb);
+
+        Matcher rgb = CSS_RGB.matcher(sb.toString());
+        StringBuilder sb2 = new StringBuilder();
+        while (rgb.find()) {
+            int r = clamp255(Integer.parseInt(rgb.group(1)));
+            int g = clamp255(Integer.parseInt(rgb.group(2)));
+            int b = clamp255(Integer.parseInt(rgb.group(3)));
+            rgb.appendReplacement(sb2, Matcher.quoteReplacement(lift(r, g, b)));
+        }
+        rgb.appendTail(sb2);
+        return sb2.toString();
+    }
+
+    private static int clamp255(int v) {
+        return v < 0 ? 0 : Math.min(v, 255);
+    }
+
+    /**
+     * The lightness flip itself. Relative luminance decides whether a colour needs it,
+     * rather than a plain average, because the eye is far more sensitive to green than
+     * to blue and an average calls a saturated blue "light" when it reads as dark.
+     */
+    private static String lift(int r, int g, int b) {
+        double lum = (0.2126 * srgb(r) + 0.7152 * srgb(g) + 0.0722 * srgb(b));
+        // Contrast against the #202020 reading surface. Anything already clearing the
+        // 4.5:1 body-text floor is the sender writing for dark, and is left alone.
+        double groundLum = 0.0144;
+        double ratio = (Math.max(lum, groundLum) + 0.05) / (Math.min(lum, groundLum) + 0.05);
+        if (lum > groundLum && ratio >= 4.5) return css(r, g, b);
+
+        float[] hsb = java.awt.Color.RGBtoHSB(r, g, b, null);
+        // Hue is kept, saturation is eased back so a lifted colour does not glow, and
+        // brightness lands in a band that clears the floor without being pure white.
+        float brightness = 0.86f - 0.12f * hsb[1];
+        float saturation = Math.min(hsb[1], 0.55f);
+        java.awt.Color lifted = java.awt.Color.getHSBColor(hsb[0], saturation, brightness);
+        return css(lifted.getRed(), lifted.getGreen(), lifted.getBlue());
+    }
+
+    private static double srgb(int c) {
+        double v = c / 255.0;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    }
+
+    private static String css(int r, int g, int b) {
+        return String.format("#%02x%02x%02x", r, g, b);
     }
 
     /**
@@ -650,10 +786,14 @@ public final class MailHtmlSanitizer {
      * sender wrote reaches the page unless it parsed as "selector { declarations }".
      */
     static String sanitizeStylesheet(String raw, boolean allowRemoteImages) {
+        return sanitizeStylesheet(raw, allowRemoteImages, false);
+    }
+
+    static String sanitizeStylesheet(String raw, boolean allowRemoteImages, boolean darkGround) {
         if (raw == null || raw.isBlank()) return "";
         String css = prepareCss(raw.length() > MAX_CSS ? raw.substring(0, MAX_CSS) : raw);
         if (css.isEmpty() || isPoisonedCss(css)) return "";
-        return rebuildRules(css, allowRemoteImages, 0);
+        return rebuildRules(css, allowRemoteImages, 0, darkGround);
     }
 
     private static final Pattern PREFERS_DARK =
@@ -695,7 +835,7 @@ public final class MailHtmlSanitizer {
     private static final Pattern SAFE_AT_RULE = Pattern.compile("@(media|supports)[A-Za-z0-9 \t\r\n:()\\-,.&|]*",
             Pattern.CASE_INSENSITIVE);
 
-    private static String rebuildRules(String css, boolean allowRemoteImages, int depth) {
+    private static String rebuildRules(String css, boolean allowRemoteImages, int depth, boolean darkGround) {
         StringBuilder out = new StringBuilder(css.length());
         int i = 0;
         int n = css.length();
@@ -712,7 +852,7 @@ public final class MailHtmlSanitizer {
                 // @media and @supports carry real layout intent. @import and @font-face
                 // fetch from a third party, which is exactly what we are preventing.
                 if (depth > 0 || !SAFE_AT_RULE.matcher(prelude).matches()) continue;
-                String inner = rebuildRules(block, allowRemoteImages, depth + 1);
+                String inner = rebuildRules(block, allowRemoteImages, depth + 1, darkGround);
                 if (inner.isEmpty()) continue;
 
                 // The reader forces a light ground for sender HTML (see wrapDocument),
@@ -738,7 +878,7 @@ public final class MailHtmlSanitizer {
                 continue;
             }
             if (prelude.isEmpty() || !SELECTOR.matcher(prelude).matches()) continue;
-            String decls = sanitizeDeclarations(block, allowRemoteImages);
+            String decls = sanitizeDeclarations(block, allowRemoteImages, darkGround);
             if (decls.isEmpty()) continue;
             out.append(prelude).append('{').append(decls).append('}');
         }

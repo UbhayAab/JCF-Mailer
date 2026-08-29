@@ -599,6 +599,193 @@
            like one, so the fade is taken back off for exactly that case. */
         #btnSend.sending:disabled{opacity:1;cursor:progress}
 
+        /* ============ recipient chips ============
+           A recipient is something you can point at and take back off again, not a
+           substring of one comma separated line. The committed addresses sit in
+           front of the input as its siblings inside the same bordered box, so the
+           label still points at one real input, focus still lands somewhere a
+           screen reader can name, and every address still owns a tap target of its
+           own. An address that will not parse is kept and marked rather than
+           dropped: a typed address that silently disappears is a worse failure
+           than one that is visibly wrong, and the send refusal names it out loud. */
+        .chips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;width:100%;
+               padding:4px 6px;min-height:32px;background:var(--field-bg);
+               border:1px solid var(--border-strong);border-radius:var(--radius-xs);
+               position:relative;cursor:text;
+               transition:border-color var(--t-fast),box-shadow var(--t-fast),background var(--t-fast)}
+        .chips.focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(47,111,237,.25);
+                     background:var(--field-bg-focus)}
+        /* The typing box is a real input and keeps its id, so label[for] and the
+           focus call in syncFocus both go on working untouched. It is stripped of
+           the .field treatment because the box around it is now the chips row. */
+        .chips .chip-in{flex:1 1 130px;min-width:130px;width:auto;padding:0 4px;
+               min-height:24px;background:none;border:0;box-shadow:none;color:var(--text);
+               font-size:13px;line-height:20px;outline:none}
+        .chips .chip-in:focus{border:0;box-shadow:none;background:none}
+        .chip{display:inline-flex;align-items:center;gap:1px;max-width:100%;
+              padding:0 2px 0 9px;height:24px;border-radius:12px;
+              background:var(--panel-3);border:1px solid var(--border);
+              font-size:12.5px;color:var(--text-dim);white-space:nowrap}
+        .chip .ct{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px;
+                  background:none;border:0;padding:0;color:inherit;font-size:inherit;cursor:pointer}
+        .chip .x{display:inline-flex;align-items:center;justify-content:center;
+                 width:22px;height:22px;flex:none;border:0;background:none;border-radius:50%;
+                 color:var(--text-mute);cursor:pointer;-webkit-tap-highlight-color:transparent;
+                 transition:background var(--t-fast),color var(--t-fast)}
+        .chip .x:hover{background:var(--panel-4);color:var(--text)}
+        .chip .x .ic{width:12px;height:12px}
+        .chip.bad{border-color:var(--danger);background:rgba(224,72,60,.10);color:var(--danger-fg)}
+        .chip.bad .x{color:var(--danger-fg)}
+        /* Backspace on an empty box arms the last chip before it removes it, so a
+           held key cannot walk backwards through a recipient list two at a time. */
+        .chip.armed{outline:2px solid var(--primary);outline-offset:1px}
+        /* The Cc and Bcc rows are hidden until asked for, and the button that asks
+           sits on the To row where every other client puts it. */
+        .field.rcpt{position:relative}
+        .field.rcpt label{display:inline-block}
+        .linkish{float:right;background:none;border:0;padding:0 0 5px;font-size:11.5px;
+                 font-weight:600;color:var(--primary-fg);cursor:pointer;
+                 -webkit-tap-highlight-color:transparent}
+        .linkish:hover{text-decoration:underline}
+
+        /* ============ recipient autocomplete ============
+           Absolutely positioned inside the chips box rather than fixed to the
+           viewport, because .sheet carries a transform in both of its states and a
+           fixed child of a transformed ancestor is positioned against that ancestor
+           instead of the window, which is a coordinate system that would silently
+           change at 900px. The three recipient rows sit at the top of a sheet that
+           scrolls, so a menu that opens downward always has room under it. */
+        .acmenu{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:5;
+                max-height:246px;overflow-y:auto;overscroll-behavior:contain;
+                background:var(--panel-3);border:1px solid var(--border-strong);
+                border-radius:var(--radius-sm);box-shadow:var(--shadow-pop);padding:4px}
+        .acmenu[hidden]{display:none}
+        .acrow{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;
+               padding:5px 9px;border:0;border-radius:var(--radius-xs);background:none;
+               color:var(--text-dim);text-align:left;cursor:pointer;
+               -webkit-tap-highlight-color:transparent}
+        .acrow:hover,.acrow[aria-selected="true"]{background:var(--panel-4);color:var(--text)}
+        .acrow .av{width:26px;height:26px;border-radius:50%;flex:none;display:grid;
+                   place-items:center;font-size:11px;font-weight:600;color:#fff;
+                   background:var(--panel-4)}
+        .acrow .tx{min-width:0;flex:1;display:flex;flex-direction:column;line-height:1.3}
+        .acrow .nm{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .acrow .em{font-size:11.5px;color:var(--text-mute);overflow:hidden;
+                   text-overflow:ellipsis;white-space:nowrap}
+        .acrow .ago{font-size:11px;color:var(--text-faint);flex:none}
+
+        /* ============ the rich text body ============
+           A contenteditable and not a textarea, so bold means bold in the letter
+           that arrives. Everything the engine puts in here is rewritten on the way
+           out by the serialiser in mail.js, so nothing about the markup below is a
+           promise about what gets sent.
+
+           overflow:auto sits on the editable itself and never on a wrapper around
+           it. iOS goes on painting the caret and the selection over content that
+           has scrolled out of a scrolling ANCESTOR, and making the editable its own
+           scroll container is the only reliable way out of that. */
+        /* 234 and not the 150 a contenteditable would otherwise settle at. The
+           textarea this replaced stood at exactly 234px on a laptop, and a
+           composer that gives you less room to write than the one before it is a
+           downgrade whatever else it gained. */
+        .editor{width:100%;min-height:234px;overflow-y:auto;
+                overscroll-behavior:contain;padding:9px 11px;
+                background:var(--field-bg);border:1px solid var(--border-strong);
+                border-radius:0 0 var(--radius-xs) var(--radius-xs);
+                color:var(--text);font-size:13px;line-height:1.6;outline:none;
+                transition:border-color var(--t-fast),box-shadow var(--t-fast),background var(--t-fast)}
+        .editor:focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(47,111,237,.25);
+                      background:var(--field-bg-focus)}
+        /* An empty contenteditable has no height of its own, and :empty stops
+           matching the instant the engine drops its own <br> in, so the placeholder
+           hangs off an attribute the serialiser sets rather than off a selector. */
+        .editor[data-empty="true"]::before{content:attr(data-placeholder);
+                color:var(--text-mute);pointer-events:none;display:block}
+        .editor p{margin:0 0 10px}
+        .editor p:last-child{margin-bottom:0}
+        .editor ul,.editor ol{margin:0 0 10px;padding-left:22px}
+        .editor li{margin:0 0 2px}
+        .editor blockquote,.editor .jq{margin:0 0 10px;padding:0 0 0 12px;
+                border-left:2px solid var(--border-strong);color:var(--text-mute)}
+        .editor .jq{margin-top:12px}
+        .editor a{color:var(--primary-fg);text-decoration:underline}
+        .editor img{max-width:100%;height:auto}
+
+        /* ============ the format bar ============
+           One node in two slots, the way #q and #btnSend already are. Above the
+           editable on a laptop; docked over the software keyboard on a phone, where
+           a bar under the fold is a bar nobody can reach and a bar floating over the
+           text is a bar that hides the words being formatted. The dock's own bottom
+           offset is written by mail.js out of visualViewport, because that is the
+           only place iOS reports the keyboard at all.
+
+           Every button is a symbol from the sprite and never a letter set in the
+           style it applies: a bold B is a glyph pressed into service as an icon and
+           this page does not do that anywhere else. Each carries an aria-label and a
+           title, because an icon with no name is a button nobody can describe. The
+           words these were, before fragments/icons.html grew the symbols, needed
+           561px of a 390px bar; the symbols need 378. */
+        .fmtwrap{background:var(--panel-2)}
+        /* The dock is the phone's slot and is not in the layout above 900px,
+           where the bar lives in #fmtDeck over the editable. An empty block
+           sitting between the sheet body and its footer is zero pixels tall and
+           still one more box for the next reader of this file to account for. */
+        #fmtDock{display:none}
+        #fmtDeck .fmtwrap{border:1px solid var(--border-strong);border-bottom:0;
+                border-radius:var(--radius-xs) var(--radius-xs) 0 0;
+                transition:border-color var(--t-fast)}
+        /* The bar and the editable under it are one control, so the focus ring
+           belongs to both. Without this the box lights up blue and the bar sitting
+           on its top edge stays grey, which reads as two fields touching. */
+        .field-msg:focus-within #fmtDeck .fmtwrap{border-color:var(--primary)}
+        .fmtbar{display:flex;align-items:center;gap:2px;padding:4px 6px;
+                overflow-x:auto;overflow-y:hidden;scrollbar-width:none;
+                -webkit-overflow-scrolling:touch}
+        .fmtbar::-webkit-scrollbar{display:none}
+        /* The bar wants 561px and a phone gives it 390, so the last two buttons
+           are off the right edge until it is scrolled. The mask is what says so:
+           a hard cut at the edge reads as a bar that ends there. It comes off the
+           day the sprite grows the six symbols these buttons are words instead
+           of, at which point the whole bar fits in 390 and never scrolls. */
+        .fmtbar{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 22px),transparent);
+                mask-image:linear-gradient(to right,#000 calc(100% - 22px),transparent)}
+        .fmtbar.fits{-webkit-mask-image:none;mask-image:none}
+        .fx{flex:none;display:inline-flex;align-items:center;justify-content:center;
+            width:34px;height:32px;padding:0;border:1px solid transparent;
+            border-radius:var(--radius-xs);background:none;color:var(--text-dim);
+            cursor:pointer;-webkit-tap-highlight-color:transparent;
+            transition:background var(--t-fast),color var(--t-fast),border-color var(--t-fast)}
+        .fx:hover{background:var(--panel-3);color:var(--text)}
+        .fx[aria-pressed="true"]{background:var(--panel-4);color:var(--text);
+                                 border-color:var(--border-strong)}
+        .fxsep{flex:none;width:1px;align-self:stretch;margin:4px 3px;background:var(--border)}
+        /* The link row replaces window.prompt, which on a phone dismisses the
+           keyboard, drops the selection and cannot be styled. The Range is saved
+           before this opens and restored before the link is written. */
+        .linkrow{display:flex;align-items:center;gap:6px;padding:0 6px 6px}
+        .linkrow[hidden]{display:none}
+        .linkrow input{flex:1;min-width:0;padding:5px 8px;min-height:32px;
+                background:var(--field-bg);border:1px solid var(--border-strong);
+                border-radius:var(--radius-xs);color:var(--text);font-size:12.5px;outline:none}
+        .linkrow input:focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(47,111,237,.25)}
+
+        /* ============ drafts ============
+           The saved time is not decoration. Autosave that says nothing is
+           indistinguishable from autosave that has stopped working, and the one
+           moment that difference matters is the moment somebody closes the tab. */
+        .field .lbl{display:block;font-size:11.5px;font-weight:600;margin-bottom:5px;
+                    color:var(--text-dim)}
+        .fmtfoot{display:none;align-items:center;gap:10px;padding:0 8px 5px}
+        .linkish.danger{color:var(--danger-fg);float:none}
+        .fmtwrap[data-draft="1"] .fmtfoot{display:flex}
+        .draftstate{font-size:11.5px;color:var(--text-mute);white-space:nowrap;
+                    display:inline-flex;align-items:center;gap:5px;min-width:0;
+                    overflow:hidden;text-overflow:ellipsis}
+        .draftstate.bad{color:var(--danger-fg)}
+        /* A forwarded file is the parent message's blob and not bytes this browser
+           is holding, so it is drawn in the same list wearing a different word. */
+        .frow.kept .sz{color:var(--text-faint);font-style:italic}
+
         /* ============ bottom tabs ============
            A direct child of <body> and nothing else. Anything position:fixed that
            lived inside .mail would be captured by the reader pane's transform,
@@ -777,8 +964,15 @@
                   padding-right:max(10px,env(safe-area-inset-right,0px))}
             .rbar .pib[data-act="back"]{display:inline-grid}
             .rbar .pib[data-act="more"]{display:inline-grid}
-            .rbar .pib[data-act="reply"],.rbar .pib[data-act="reply-all"],
-            .rbar .pib[data-act="forward"],.rbar .pib[data-act="archive"]{display:none}
+            /* Reply, reply to everyone and forward stay on the bar on a phone.
+               They were folded into the overflow menu to save width, and the cost was
+               that the second most common action in a mailbox became invisible: there
+               was a Reply button and no Reply all anywhere on screen, so it read as a
+               missing feature rather than a hidden one. Five icon buttons at 44px plus
+               their gaps is 244px, which fits inside 390 with room to spare, so the
+               width was never the real constraint. Archive stays in the menu, because
+               it is the one of the four that is not a reply. */
+            .rbar .pib[data-act="archive"]{display:none}
             /* Once the head has scrolled away the pane is a letter with nobody's
                name on it, so the bar picks the sender up at the moment the
                sender line leaves the top of the scroller, and the folder label
@@ -860,12 +1054,72 @@
                with 300px of dead panel under it reads as a broken layout. */
             #composeSheet .sheet-b{padding:16px;display:flex;flex-direction:column;
                                    padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))}
-            /* Named and no longer :last-child. The attach block now sits below the
-               message, so the positional selector this used to be would have picked
-               that up instead and the textarea would have stopped growing the day
-               attachments landed. */
-            #composeSheet .field-msg{flex:1 1 auto;display:flex;flex-direction:column;min-height:160px}
-            #composeSheet .field-msg textarea{flex:1 1 auto;resize:none}
+            /* ---- the composer on a phone ----
+               The 16px rule above matches .field input and .field textarea by
+               selector, and neither of those is what the composer is made of any
+               more, so both of the boxes that replaced them have to be named here
+               or iOS zooms the whole page on every focus and never zooms back. */
+            .chips .chip-in,.editor,.linkrow input{font-size:16px}
+            .chips{min-height:44px;padding:5px 6px;gap:8px}
+            /* 36 and 32 rather than the 44 section 14 asks of everything tappable,
+               and this is the one deliberate exception on the sheet. A 44px remove
+               button forces a 44px token, and four recipients would then be 200px
+               of a 844px screen before a word is written. 32px is the size every
+               shipping client uses here, the two targets inside a token are 8px
+               apart, and the box around them is a full 44. */
+            .chip{height:36px;border-radius:18px;font-size:13.5px;padding:0 3px 0 12px}
+            /* Stretched to the full token height, so the target for correcting an
+               address is the whole visible name and not the 20px the text occupies. */
+            .chip .ct{max-width:220px;align-self:stretch;display:flex;align-items:center}
+            .chip .x{width:32px;height:32px}
+            .chip .x .ic{width:14px;height:14px}
+            .acrow{min-height:48px}
+            .linkish{min-height:44px;padding:6px 0 6px 10px;font-size:13px}
+            .fmtfoot{padding:0 8px 8px}
+            /* 44 square, and the bar's own side padding drops to 2 to pay for it:
+               eight of them plus two rules came to 396 in a 390 bar, which is six
+               pixels of scroll for no reason anybody could see. */
+            .fx{width:44px;height:44px}
+            .fmtbar{padding:4px 2px;gap:1px}
+
+            /* The format bar leaves the flow and docks to the bottom of the sheet.
+               #fmtDock is a flex sibling of .sheet-b rather than anything fixed,
+               because .sheet is the phone's whole screen already and a fixed bar
+               inside a transformed ancestor is positioned against that ancestor
+               anyway. What mail.js writes on it is margin-bottom: the height the
+               software keyboard is covering, read from visualViewport, so the bar
+               sits ON the keyboard instead of under it. The keyboard is the only
+               thing on this screen the page cannot see any other way. */
+            #fmtDeck{display:none}
+            /* No transition on the margin, deliberately. The operating system is
+               already animating the keyboard underneath it, and a bar easing into
+               place over 120ms visibly trails the thing it is sitting on. It also
+               meant the layout was still mid-animation one frame after the resize,
+               so the code that scrolls the writing area up measured the screen the
+               keyboard had already replaced and scrolled nothing. */
+            #fmtDock{display:block;flex:none;border-top:1px solid var(--border);
+                     padding-bottom:env(safe-area-inset-bottom,0px)}
+            /* Cleared while the keyboard is up: the inset is the keyboard's job
+               then, and paying it twice leaves a charcoal band under the bar. */
+            #fmtDock[data-kb="1"]{padding-bottom:0}
+
+            /* The editable takes the rest of the sheet, the way the textarea it
+               replaced used to. min-height is deliberately small: with the keyboard
+               up there are only about 200px of screen left, and a 160px floor would
+               push the attach row and the subject off the top rather than let the
+               sheet body scroll. */
+            /* 200 and not 100, and the sheet body is allowed to overflow because of
+               it. Sized to fit alongside the header rows, the writing area came out
+               at 104px with the keyboard up, which is four lines. The rows scroll
+               away instead, the caret is kept in view by the editor's own scroller,
+               and one swipe up brings every header row back. */
+            /* An explicit gap, because the focus ring on the editable and the top
+               edge of the attach block were landing on the same pixel row and read
+               as one broken box. */
+            #composeSheet .field-msg{flex:1 1 auto;display:flex;flex-direction:column;
+                                     min-height:200px;margin-bottom:16px}
+            #composeSheet .field-msg .editor{flex:1 1 auto;min-height:200px;
+                                             border-radius:var(--radius-xs)}
             /* Full width, because a thumb reaching the bottom of a full screen sheet
                should not have to find a 130px target on the left of it. */
             #btnAttach{flex:1 1 100%}
@@ -1147,7 +1401,7 @@
 <div class="backdrop" id="composeSheet">
     <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="composeTitle">
         <div class="sheet-h">
-            <button class="pib" type="button" id="btnCancelTop" aria-label="Discard and close">
+            <button class="pib" type="button" id="btnCancelTop" aria-label="Close, keeping this as a draft">
                 <svg class="ic ic-lg" aria-hidden="true"><use href="#i-close"/></svg></button>
             <!-- Two slots for one address node, both inside .sheet-h as section
                  14.2 asks. On a laptop it is a pill beside Send; on a phone it
@@ -1166,13 +1420,94 @@
                  state, so a rotation mid send does not lose either. -->
             <span class="qslot" id="sendHead"></span>
         </div>
-        <div class="sheet-b">
-            <div class="field"><label for="cTo">To</label>
-                <input id="cTo" autocomplete="off" inputmode="email" placeholder="name@example.com, second@example.com"></div>
-            <div class="field"><label for="cCc">Cc</label>
-                <input id="cCc" autocomplete="off" inputmode="email" placeholder="optional"></div>
+        <div class="sheet-b" id="composeBody">
+            <!-- #cTo, #cCc and #cBcc are still real inputs and still carry the ids
+                 they always had, so label[for], syncFocus and every existing
+                 listener go on working. What changed is the box around them: the
+                 committed addresses are now siblings of the input inside .chips,
+                 which is what lets one of them be taken off without editing a
+                 string. Cc and Bcc are hidden until the button on the To row asks
+                 for them, and reveal themselves when a reply fills them in. -->
+            <div class="field rcpt" id="fldTo">
+                <button class="linkish" type="button" id="btnCcBcc"
+                        aria-expanded="false" aria-controls="fldCc fldBcc">Cc / Bcc</button>
+                <label for="cTo">To</label>
+                <div class="chips" id="cToField" data-chips="to">
+                    <input id="cTo" class="chip-in" autocomplete="off" inputmode="email"
+                           role="combobox" aria-expanded="false" aria-autocomplete="list"
+                           aria-controls="acMenu" placeholder="name@example.com">
+                </div>
+            </div>
+            <div class="field rcpt" id="fldCc" hidden>
+                <label for="cCc">Cc</label>
+                <div class="chips" id="cCcField" data-chips="cc">
+                    <input id="cCc" class="chip-in" autocomplete="off" inputmode="email"
+                           role="combobox" aria-expanded="false" aria-autocomplete="list"
+                           aria-controls="acMenu" placeholder="optional">
+                </div>
+            </div>
+            <!-- Bcc is a row of its own and never a flag on Cc. A blind copy that
+                 shares a box with a visible one is one mis-click away from a
+                 disclosure nobody can take back. -->
+            <div class="field rcpt" id="fldBcc" hidden>
+                <label for="cBcc">Bcc</label>
+                <div class="chips" id="cBccField" data-chips="bcc">
+                    <input id="cBcc" class="chip-in" autocomplete="off" inputmode="email"
+                           role="combobox" aria-expanded="false" aria-autocomplete="list"
+                           aria-controls="acMenu" placeholder="hidden from everyone else">
+                </div>
+            </div>
+            <!-- One menu for all three fields, moved into whichever .chips is being
+                 typed into. Three menus would be three sets of listeners and three
+                 chances for two of them to be open at the same time. -->
+            <div class="acmenu" id="acMenu" role="listbox" aria-label="Matching contacts" hidden></div>
+
             <div class="field"><label for="cSubject">Subject</label><input id="cSubject" autocomplete="off"></div>
-            <div class="field field-msg"><label for="cBody">Message</label><textarea id="cBody" rows="12"></textarea></div>
+
+            <!-- A span and not a <label>. label[for] does not associate with a div,
+                 so the editable is named through aria-labelledby instead, and a
+                 <label> pointing at a div would be worse than no label at all. -->
+            <div class="field field-msg">
+                <span class="lbl" id="cBodyLabel">Message</span>
+                <span class="qslot" id="fmtDeck">
+                    <!-- One node in two slots, the way #q and #btnSend already are.
+                         placeChrome moves it into #fmtDock below 900px. -->
+                    <div class="fmtwrap" id="fmtGroup">
+                        <!-- Ordered by what a letter actually uses, because on a phone
+                             the bar is wider than the screen and the order decides
+                             which controls are there before anybody scrolls. -->
+                        <div class="fmtbar" id="fmtBar" role="toolbar" aria-label="Formatting">
+                            <button class="fx" type="button" data-cmd="bold" aria-pressed="false" aria-label="Bold" title="Bold"><svg class="ic" aria-hidden="true"><use href="#i-bold"/></svg></button>
+                            <button class="fx" type="button" data-cmd="italic" aria-pressed="false" aria-label="Italic" title="Italic"><svg class="ic" aria-hidden="true"><use href="#i-italic"/></svg></button>
+                            <button class="fx" type="button" data-cmd="link" aria-pressed="false" aria-label="Link" title="Link"><svg class="ic" aria-hidden="true"><use href="#i-link"/></svg></button>
+                            <span class="fxsep" aria-hidden="true"></span>
+                            <button class="fx" type="button" data-cmd="insertUnorderedList" aria-pressed="false" aria-label="Bulleted list" title="Bulleted list"><svg class="ic" aria-hidden="true"><use href="#i-list-ul"/></svg></button>
+                            <button class="fx" type="button" data-cmd="insertOrderedList" aria-pressed="false" aria-label="Numbered list" title="Numbered list"><svg class="ic" aria-hidden="true"><use href="#i-list-ol"/></svg></button>
+                            <span class="fxsep" aria-hidden="true"></span>
+                            <button class="fx" type="button" data-cmd="underline" aria-pressed="false" aria-label="Underline" title="Underline"><svg class="ic" aria-hidden="true"><use href="#i-underline"/></svg></button>
+                            <button class="fx" type="button" data-cmd="quote" aria-pressed="false" aria-label="Quote" title="Quote"><svg class="ic" aria-hidden="true"><use href="#i-quote"/></svg></button>
+                            <button class="fx" type="button" data-cmd="removeFormat" aria-label="Clear formatting" title="Clear formatting"><svg class="ic" aria-hidden="true"><use href="#i-clear-format"/></svg></button>
+                        </div>
+                        <div class="linkrow" id="linkRow" hidden>
+                            <input id="linkUrl" type="url" inputmode="url" autocomplete="off"
+                                   placeholder="https://" aria-label="Link address">
+                            <button class="btn sm pri" type="button" id="linkAdd">Add link</button>
+                            <button class="btn sm" type="button" id="linkCancel">Cancel</button>
+                        </div>
+                        <!-- Shown only once there is something to keep, so an
+                             untouched composer carries no line about saving and
+                             no way to throw away a message nobody has written. -->
+                        <div class="fmtfoot">
+                            <button class="linkish danger" type="button" id="btnDiscard" hidden>Discard</button>
+                            <span class="spacer"></span>
+                            <span class="draftstate" id="draftState"></span>
+                        </div>
+                    </div>
+                </span>
+                <div class="editor" id="cEditor" contenteditable="true" role="textbox"
+                     aria-multiline="true" aria-labelledby="cBodyLabel"
+                     data-empty="true" data-placeholder="Write your message"></div>
+            </div>
             <!-- Below the message and not above it, because the order on screen is
                  the order of the job: say the thing, then add what goes with it.
                  The real <input type="file"> is hidden and driven by the button
@@ -1195,6 +1530,12 @@
                 <ul class="filelist" id="fileList"></ul>
             </div>
         </div>
+        <!-- The second slot for the format bar. Empty and display:none above 900px,
+             where the bar sits in #fmtDeck directly over the editable; below it this
+             is a docked strip whose margin-bottom mail.js sets to the height the
+             software keyboard is covering, so the bar rides on top of the keyboard
+             instead of vanishing under it. -->
+        <div id="fmtDock"></div>
         <div class="sheet-f">
             <!-- Two children rather than a text node: .fill is the upload progress
                  and .lbl is what it says. sendMessage() writes to #sendLabel, never
@@ -1202,7 +1543,7 @@
                  the fill out with it. -->
             <span class="qslot" id="sendFoot"><button class="btn pri" type="button" id="btnSend"><span
                     class="fill" id="sendFill"></span><span class="lbl" id="sendLabel">Send</span></button></span>
-            <button class="btn" type="button" id="btnCancel">Cancel</button>
+            <button class="btn" type="button" id="btnCancel">Close</button>
             <span class="spacer"></span>
             <span class="muted hint">Sends through the jarurat.care mail server</span>
         </div>
@@ -1244,7 +1585,7 @@
      deploy would otherwise hand an installed phone this template with the
      previous script: no tab wiring, no data-pane, no slide. The other half is
      bumping VERSION in sw.js, which is a different file and a different owner. -->
-<script src="/js/mail.js?v=attach1"></script>
+<script src="/js/mail.js?v=compose1"></script>
 <th:block th:replace="~{fragments/pwa :: script}"></th:block>
 </body>
 </html>

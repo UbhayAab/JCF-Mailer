@@ -268,6 +268,16 @@ function applyState(next) {
   $('accountSheet').classList.toggle('open', UI.overlay === 'account');
   $('moreSheet').classList.toggle('open', UI.overlay === 'more');
   $('composeSheet').classList.toggle('open', UI.overlay === 'compose');
+  // Closing the composer files what is in it. popstate cannot be cancelled and a
+  // save cannot be awaited from there, so the close is allowed to happen and the
+  // request follows it; a failure leaves the composer's own state in memory and
+  // says so on the sheet, which is what reopening restores from.
+  if (prev.overlay === 'compose' && UI.overlay !== 'compose') {
+    closeLinkRow(false);
+    acClose();
+    if (composeHasContent() && composeDirty()) saveDraft('close');
+    dockToKeyboard();
+  }
   $('foldersSheetTitle').textContent = UI.overlay === 'move' ? 'Move to folder' : 'Folders';
 
   // visibility:hidden is the portable half for older Android WebView; inert is
@@ -358,16 +368,11 @@ function goOverlay(name) {
 window.addEventListener('popstate', function (e) {
   const s = (e.state && e.state.jm) || BASE;
 
-  // popstate is not cancellable, so a compose with unsaved text is put back on
-  // the stack and the question is asked from there.
-  if (!popGuard && UI.overlay === 'compose' && s.overlay !== 'compose' && composeDirty()) {
-    popGuard = true;
-    history.pushState({ jm: Object.assign({}, UI) }, '');
-    popGuard = false;
-    applyState(UI);
-    if (window.confirm('Discard this message?')) { clearCompose(); history.back(); }
-    return;
-  }
+  // There used to be a confirm here asking whether to throw the message away.
+  // It is gone, because closing the composer now files a draft instead of
+  // discarding one, and a question whose safe answer is always the same is a
+  // question people learn to click through. Discard is a deliberate button on
+  // the sheet. The save itself is fired from applyState, on the transition.
 
   applyState(s);
   const run = afterPop;
@@ -391,9 +396,14 @@ function placeChrome() {
   // screen at all, so an address parked there would be an address nobody sees;
   // under the title it is a caption of the thing it belongs to.
   (phone ? $('fromPhone') : $('fromHead')).appendChild($('composeFrom'));
+  // The format bar is the third node that moves rather than being mirrored. Over
+  // the editable on a laptop; docked above the software keyboard on a phone, for
+  // the reason dockToKeyboard sets out at length.
+  (phone ? $('fmtDock') : $('fmtDeck')).appendChild($('fmtGroup'));
+  measureToolbar();
 }
 
-mqPhone.addEventListener('change', () => { placeChrome(); applyState(UI); });
+mqPhone.addEventListener('change', () => { placeChrome(); applyState(UI); dockToKeyboard(); });
 
 /* ---------- the three states every pane owes ---------- */
 
@@ -799,6 +809,11 @@ function attachmentList(m) {
 
 async function openMessage(id, opts) {
   opts = opts || {};
+  /* A draft is a message you are still writing, so the row opens the composer and
+     not the reader. Reading your own unfinished letter in a sandboxed frame with
+     a Reply button under it is the wrong screen for it in every mail client
+     there has ever been. */
+  if (S.folderRole === 'drafts' && can('MAIL_SEND') && !opts.read) { resumeDraft(id); return; }
   const push = opts.push !== false;
   const wasOpen = document.body.dataset.pane === 'reader';
 
@@ -1095,12 +1110,1103 @@ async function lockMailbox() {
 
 /* ---------- compose ---------- */
 
+/* =========================================================================
+   Addresses
+
+   One scanner, used by the chip fields, by paste and by the reply builder, so
+   there is exactly one answer in this file to the question of where one
+   recipient ends and the next begins. It has to be a scanner rather than a
+   split, because a display name is allowed to hold the separator: split on a
+   comma and "Sharma, Priya" <priya@jarurat.care> becomes two recipients, one of
+   which is the word Sharma.
+   ========================================================================= */
+
+/* Deliberately narrower than RFC 5322 allows. The job here is to tell somebody
+   they have mistyped before they send, so it has to refuse what is almost
+   certainly a slip: no spaces, one at sign, a dotted domain with no leading or
+   trailing hyphen in any label. Quoted local parts and address literals are
+   legal and are refused, and that is the trade: the server is still the one
+   that decides, and it will accept anything this is wrong about. */
+const ADDR_RE = /^[^\s@<>,;"]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
+
+function addressOk(email) {
+  return ADDR_RE.test(String(email || '').trim()) && String(email).length <= 254;
+}
+
+/** One token to a recipient. Accepts "Name <a@b>", <a@b>, mailto:a@b and a@b. */
+function parseAddress(token) {
+  let raw = String(token || '').trim();
+  let name = '';
+  const lt = raw.lastIndexOf('<');
+  const gt = raw.lastIndexOf('>');
+  if (lt >= 0 && gt > lt) {
+    name = raw.slice(0, lt).trim();
+    raw = raw.slice(lt + 1, gt).trim();
+  }
+  name = name.replace(/^"(.*)"$/, '$1').trim();
+  const email = raw.replace(/^mailto:/i, '').trim();
+  return { name: name, email: email, ok: addressOk(email) };
+}
+
+/**
+ * A whole pasted list to recipients.
+ *
+ * Commas, semicolons and newlines separate, but only outside quotes and outside
+ * angle brackets. Whitespace does not separate, because a display name is mostly
+ * whitespace; the one exception is a run of bare addresses with nothing else in
+ * it, which is what a copy out of a spreadsheet column looks like, and that is
+ * detected after the fact rather than guessed at during the scan.
+ */
+function splitAddresses(raw) {
+  const tokens = [];
+  let buf = '', quoted = false, angled = false;
+  const flush = () => { const t = buf.trim(); buf = ''; if (t) tokens.push(t); };
+  const src = String(raw || '');
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '"') { quoted = !quoted; buf += ch; continue; }
+    if (!quoted && ch === '<') { angled = true; buf += ch; continue; }
+    if (!quoted && ch === '>') { angled = false; buf += ch; continue; }
+    if (!quoted && !angled && (ch === ',' || ch === ';' || ch === '\n' || ch === '\r')) { flush(); continue; }
+    buf += ch;
+  }
+  flush();
+
+  const out = [];
+  tokens.forEach(t => {
+    // Only split on whitespace when every piece is itself an address, so a name
+    // that happens to contain no angle brackets is never torn in half.
+    if (!/[<>"]/.test(t) && /\s/.test(t)) {
+      const pieces = t.split(/\s+/).filter(Boolean);
+      if (pieces.length > 1 && pieces.every(addressOk)) {
+        pieces.forEach(p => out.push(parseAddress(p)));
+        return;
+      }
+    }
+    out.push(parseAddress(t));
+  });
+  return out.filter(a => a.email);
+}
+
+/* =========================================================================
+   Recipient chip fields
+
+   Three of these, one per header line. The typing box keeps the id it always
+   had, which is what lets label[for], syncFocus and every existing listener go
+   on working; the chips are its siblings inside the bordered box around it.
+
+   An address that will not parse is committed as a chip wearing the refusal
+   rather than being rejected at the keystroke, because refusing mid-typing
+   fights the person while they are still typing, and dropping it silently is
+   how a message goes to four of five recipients and nobody finds out.
+   ========================================================================= */
+
+function ChipField(inputId, boxId, kind) {
+  this.input = $(inputId);
+  this.box = $(boxId);
+  this.kind = kind;
+  this.items = [];
+  this.wire();
+}
+
+ChipField.prototype.wire = function () {
+  const self = this;
+
+  // The whole box is the target, because a 24px chip row inside a 44px field
+  // leaves most of the box as dead space that ought to focus the input.
+  this.box.addEventListener('mousedown', e => {
+    if (e.target.closest('button')) return;
+    if (e.target === self.input) return;
+    e.preventDefault();
+    self.input.focus();
+  });
+
+  this.box.addEventListener('click', e => {
+    const rm = e.target.closest('[data-rmchip]');
+    if (rm) { self.removeAt(Number(rm.dataset.rmchip)); self.input.focus(); return; }
+    // Clicking the name puts the address back in the box to be corrected, which
+    // is the only repair a chip needs and the one people reach for on a typo.
+    const edit = e.target.closest('[data-editchip]');
+    if (edit) {
+      const i = Number(edit.dataset.editchip);
+      const it = self.items[i];
+      self.commit();
+      self.removeAt(i);
+      self.input.value = it.name ? it.name + ' <' + it.email + '>' : it.email;
+      self.input.focus();
+      acAsk(self);
+    }
+  });
+
+  this.input.addEventListener('keydown', e => {
+    if (acKey(e, self)) return;               // the menu gets first refusal
+    if (e.key === ',' || e.key === ';' || e.key === 'Enter') {
+      // Enter with an empty box is a submit gesture on every other form on this
+      // page, so it is left alone rather than swallowed.
+      if (!self.input.value.trim()) return;
+      e.preventDefault();
+      self.commit();
+      return;
+    }
+    if (e.key === 'Tab' && self.input.value.trim()) { self.commit(); return; }
+    if (e.key === 'Backspace' && !self.input.value && self.items.length) {
+      e.preventDefault();
+      const last = self.box.querySelector('.chip:nth-last-of-type(1)');
+      if (last && !last.classList.contains('armed')) { last.classList.add('armed'); return; }
+      self.removeAt(self.items.length - 1);
+    }
+  });
+
+  this.input.addEventListener('input', () => {
+    self.box.querySelectorAll('.chip.armed').forEach(c => c.classList.remove('armed'));
+    acAsk(self);
+  });
+
+  // preventDefault and read the clipboard ourselves, or a pasted column of forty
+  // addresses lands as one 900 character string in a box 130px wide.
+  this.input.addEventListener('paste', e => {
+    const text = e.clipboardData && e.clipboardData.getData('text/plain');
+    if (!text) return;
+    e.preventDefault();
+    self.commit(self.input.value + text + ',');
+  });
+
+  this.input.addEventListener('focus', () => {
+    self.box.classList.add('focus');
+    acAsk(self);
+  });
+
+  // Deferred, because a click on a menu row blurs the input before the row's own
+  // click handler runs, and committing here would take the menu away first.
+  this.input.addEventListener('blur', () => {
+    setTimeout(() => {
+      if (document.activeElement === self.input) return;
+      self.box.classList.remove('focus');
+      self.box.querySelectorAll('.chip.armed').forEach(c => c.classList.remove('armed'));
+      self.commit();
+      if (AC.field === self) acClose();
+    }, 140);
+  });
+};
+
+/** Everything in the typing box becomes chips. Called on every commit gesture. */
+ChipField.prototype.commit = function (text) {
+  const raw = text === undefined ? this.input.value : text;
+  if (!String(raw).trim()) return;
+  this.input.value = '';
+  splitAddresses(raw).forEach(a => this.add(a));
+  this.render();
+  onComposeInput();
+};
+
+ChipField.prototype.add = function (addr) {
+  if (!addr || !addr.email) return;
+  const key = addr.email.toLowerCase();
+  // Folded across all three fields, not only this one. The same address in To
+  // and in Bcc is a person who gets two copies and can see one of them.
+  if (CHIPS.some(f => f.items.some(x => x.email.toLowerCase() === key))) return;
+  this.items.push(addr);
+};
+
+ChipField.prototype.removeAt = function (i) {
+  this.items.splice(i, 1);
+  this.render();
+  onComposeInput();
+};
+
+ChipField.prototype.set = function (list) {
+  this.items = [];
+  (list || []).forEach(a => {
+    const one = typeof a === 'string' ? parseAddress(a) : { name: a.name || '', email: a.email || '', ok: addressOk(a.email) };
+    this.add(one);
+  });
+  this.input.value = '';
+  this.render();
+};
+
+ChipField.prototype.render = function () {
+  const self = this;
+  // Rebuilt rather than patched. A recipient list is at most a few dozen nodes,
+  // and a diff here would be more code than the thing it is optimising.
+  this.box.querySelectorAll('.chip').forEach(c => c.remove());
+  const frag = document.createDocumentFragment();
+  this.items.forEach((a, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'chip' + (a.ok ? '' : ' bad');
+    chip.setAttribute('data-addr', a.email);
+    if (!a.ok) chip.title = a.email + ' is not an email address.';
+    const label = document.createElement('button');
+    label.type = 'button';
+    label.className = 'ct';
+    label.setAttribute('data-editchip', String(i));
+    // textContent and never innerHTML: the display name came off the wire.
+    label.textContent = a.name || a.email;
+    label.title = a.name ? a.name + ' <' + a.email + '>' : a.email;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'x';
+    x.setAttribute('data-rmchip', String(i));
+    // The field is in the name, because a screen reader hearing eight identical
+    // "Remove" buttons on one sheet cannot tell a To from a Bcc.
+    x.setAttribute('aria-label', 'Remove ' + a.email + ' from ' + self.title());
+    x.innerHTML = icon('i-close');
+    chip.appendChild(label);
+    chip.appendChild(x);
+    frag.appendChild(chip);
+  });
+  this.box.insertBefore(frag, this.input);
+  self.input.placeholder = self.items.length ? '' : self.input.dataset.ph || self.input.placeholder;
+};
+
+/** What this field is called out loud, for the labels on its own controls. */
+ChipField.prototype.title = function () {
+  return this.kind === 'to' ? 'To' : this.kind === 'cc' ? 'Cc' : 'Bcc';
+};
+
+ChipField.prototype.emails = function () { return this.items.map(a => a.email); };
+/* Bare addresses, comma joined. The send endpoint splits on comma and semicolon
+   and parses nothing else, so a display name travelling with one would arrive as
+   part of the address. The names are the composer's own, for the person typing. */
+ChipField.prototype.serialise = function () { return this.emails().join(', '); };
+ChipField.prototype.bad = function () { return this.items.filter(a => !a.ok); };
+
+let CHIPS = [];
+let cTo = null, cCc = null, cBcc = null;
+
+/* =========================================================================
+   Recipient autocomplete
+
+   Against the contract in ContactSuggestApi: always 200, never an unlock sheet,
+   an echoed q so a slow early answer cannot land on top of a fast later one,
+   and an empty first answer that means "still warming" rather than "no
+   contacts". One menu node moves between the three fields.
+   ========================================================================= */
+
+const AC = { field: null, rows: [], index: -1, timer: null, seq: 0, warm: false };
+
+function acClose() {
+  const menu = $('acMenu');
+  menu.hidden = true;
+  menu.innerHTML = '';
+  if (AC.field) AC.field.input.setAttribute('aria-expanded', 'false');
+  AC.field = null;
+  AC.rows = [];
+  AC.index = -1;
+}
+
+/** Fired once when the composer opens: the first call warms the address book. */
+function acWarm() {
+  if (AC.warm) return;
+  AC.warm = true;
+  fetch('/api/mail/contacts?q=&limit=1', { headers: { Accept: 'application/json' } })
+    .catch(() => { AC.warm = false; });
+}
+
+function acAsk(field) {
+  clearTimeout(AC.timer);
+  const q = field.input.value.trim();
+  // A prefix with a separator still in it is on its way to being committed, not
+  // on its way to being searched.
+  if (/[,;]/.test(q)) { acClose(); return; }
+  AC.timer = setTimeout(() => acFetch(field, q), 120);
+}
+
+async function acFetch(field, q) {
+  const seq = ++AC.seq;
+  let data;
+  try {
+    data = await api('/api/mail/contacts?q=' + encodeURIComponent(q) + '&limit=8');
+  } catch (e) {
+    // This endpoint promises never to fail. If it does anyway, an autocomplete
+    // is the last thing that should put an unlock sheet over somebody's typing.
+    acClose();
+    return;
+  }
+  if (seq !== AC.seq) return;                       // overtaken by later typing
+  if (document.activeElement !== field.input) return;
+  if (data.locked) { acClose(); return; }
+  // The server echoes the query it understood, which is the second guard: a slow
+  // answer to "pri" must not paint under a box that now reads "priyanka".
+  if ((data.q || '') !== q) return;
+
+  const taken = new Set();
+  CHIPS.forEach(f => f.items.forEach(a => taken.add(a.email.toLowerCase())));
+  AC.rows = (data.contacts || []).filter(c => !taken.has(String(c.email).toLowerCase()));
+  if (!AC.rows.length) { acClose(); return; }
+
+  AC.field = field;
+  AC.index = -1;
+  const menu = $('acMenu');
+  field.box.appendChild(menu);
+  menu.innerHTML = '';
+  AC.rows.forEach((c, i) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'acrow';
+    row.setAttribute('role', 'option');
+    row.setAttribute('aria-selected', 'false');
+    row.dataset.i = String(i);
+    const av = document.createElement('span');
+    av.className = 'av';
+    av.setAttribute('aria-hidden', 'true');
+    paintAvatar(av, c.email, c.name);
+    const tx = document.createElement('span');
+    tx.className = 'tx';
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    // The contract says name is not escaped, so it goes in as text and never as
+    // markup. This is the one place a contact's own string reaches the DOM.
+    nm.textContent = c.name || c.email;
+    tx.appendChild(nm);
+    if (c.name) {
+      const em = document.createElement('span');
+      em.className = 'em';
+      em.textContent = c.email;
+      tx.appendChild(em);
+    }
+    row.appendChild(av);
+    row.appendChild(tx);
+    if (c.lastSeen) {
+      const ago = document.createElement('span');
+      ago.className = 'ago';
+      ago.textContent = when(c.lastSeen);
+      row.appendChild(ago);
+    }
+    menu.appendChild(row);
+  });
+  menu.hidden = false;
+  field.input.setAttribute('aria-expanded', 'true');
+}
+
+function acHighlight(next) {
+  const rows = $('acMenu').querySelectorAll('.acrow');
+  if (!rows.length) return;
+  if (AC.index >= 0 && rows[AC.index]) rows[AC.index].setAttribute('aria-selected', 'false');
+  AC.index = (next + rows.length) % rows.length;
+  rows[AC.index].setAttribute('aria-selected', 'true');
+  rows[AC.index].scrollIntoView({ block: 'nearest' });
+}
+
+function acTake(i) {
+  const c = AC.rows[i];
+  const field = AC.field;
+  if (!c || !field) return;
+  field.input.value = '';
+  field.add({ name: c.name || '', email: c.email, ok: addressOk(c.email) });
+  field.render();
+  acClose();
+  field.input.focus();
+  onComposeInput();
+}
+
+/** True when the menu consumed the key, so the field's own handler stands down. */
+function acKey(e, field) {
+  if (AC.field !== field || $('acMenu').hidden) return false;
+  if (e.key === 'ArrowDown') { e.preventDefault(); acHighlight(AC.index + 1); return true; }
+  if (e.key === 'ArrowUp') { e.preventDefault(); acHighlight(AC.index - 1); return true; }
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); acClose(); return true; }
+  if ((e.key === 'Enter' || e.key === 'Tab') && AC.index >= 0) {
+    e.preventDefault();
+    acTake(AC.index);
+    return true;
+  }
+  return false;
+}
+
+$('acMenu').addEventListener('mousedown', e => e.preventDefault());   // keep the caret
+$('acMenu').addEventListener('click', e => {
+  const row = e.target.closest('.acrow');
+  if (row) acTake(Number(row.dataset.i));
+});
+
+/* =========================================================================
+   The rich text body
+
+   execCommand for the six commands every engine implements, because it is the
+   only formatting path that keeps the native undo stack and the IME's own
+   behaviour, and a replacement built on Range surgery means owning a document
+   model, which is the library this app is not allowed to have.
+
+   What the engines disagree about is the markup they emit, and that is answered
+   on the way out rather than on the way in: nothing here trusts editor.innerHTML.
+   The serialiser below rebuilds the whole subtree through one allowlist, so
+   Gecko's <span style="font-weight:bold"> and WebKit's <b> both leave as
+   <strong> and the recipient cannot tell which browser wrote the letter.
+
+   None of this is a security control. It is a quality control. The security
+   control is the server, which re-cleans every byte because what a browser sent
+   is evidence of intent and never evidence of safety.
+   ========================================================================= */
+
+/* Blocks kept, and what they become. div and p are the same thing here on
+   purpose: Safari emits div on Enter whatever defaultParagraphSeparator says, so
+   a serialiser that treated them differently would produce different mail from
+   the same keystrokes on the same page. */
+const OUT_BLOCK = {
+  P: 'p', DIV: 'p', BLOCKQUOTE: 'blockquote', UL: 'ul', OL: 'ol', LI: 'li',
+  HR: 'hr', PRE: 'pre',
+  H1: 'h3', H2: 'h3', H3: 'h3', H4: 'h4', H5: 'h4', H6: 'h4',
+  TABLE: 'table', THEAD: 'thead', TBODY: 'tbody', TFOOT: 'tbody',
+  TR: 'tr', TD: 'td', TH: 'th'
+};
+
+const OUT_INLINE = {
+  B: 'strong', STRONG: 'strong', I: 'em', EM: 'em', U: 'u',
+  S: 's', STRIKE: 's', DEL: 's', A: 'a', BR: 'br', CODE: 'code',
+  SUB: 'sub', SUP: 'sup', SMALL: 'small'
+};
+
+/* Inline styles, because Outlook renders through the Word engine, drops <style>
+   and <head> entirely, and has defaults for list indent and blockquote that are
+   wrong. There is no head stylesheet in a mail to fix them in, so every one of
+   these has to travel on the element. px and % only: calc() reaches 7% of the
+   client field and custom properties 6%. */
+const OUT_STYLE = {
+  p: 'margin:0 0 12px 0',
+  ul: 'margin:0 0 12px 20px;padding:0',
+  ol: 'margin:0 0 12px 20px;padding:0',
+  blockquote: 'margin:0 0 12px 12px;padding:0 0 0 12px;border-left:2px solid #dde5e8;color:#5a6b76',
+  a: 'color:#00697f',
+  hr: 'border:0;border-top:1px solid #dde5e8;margin:16px 0',
+  h3: 'margin:0 0 8px 0;font-size:17px;line-height:1.35',
+  h4: 'margin:0 0 8px 0;font-size:15px;line-height:1.35',
+  pre: 'margin:0 0 12px 0;white-space:pre-wrap;font-family:Consolas,Monaco,monospace;font-size:13px',
+  table: 'border-collapse:collapse;max-width:100%',
+  td: 'padding:4px 8px;vertical-align:top',
+  th: 'padding:4px 8px;vertical-align:top;text-align:left'
+};
+
+const BLOCK_TAGS = new Set(['p', 'blockquote', 'ul', 'ol', 'li', 'hr', 'pre', 'h3', 'h4',
+  'table', 'thead', 'tbody', 'tr', 'td', 'th']);
+const VOID_TAGS = new Set(['br', 'hr']);
+const OUT_SCHEMES = /^(https?:|mailto:|tel:)/i;
+
+/** True when an inline element is really a wrapper around block content. */
+function hasBlockChild(el) {
+  for (let n = el.firstElementChild; n; n = n.nextElementSibling) {
+    const t = OUT_BLOCK[n.tagName];
+    if (t && BLOCK_TAGS.has(t)) return true;
+    if (hasBlockChild(n)) return true;
+  }
+  return false;
+}
+
+function escAttr(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** A link the composer will emit, or '' for one it will not. */
+function outHref(raw) {
+  let v = String(raw || '').trim().replace(/[\u0000-\u0020\u007f]/g, '');
+  if (!v) return '';
+  // A bare domain is what people actually type into a link box. Refusing it and
+  // saying "start it with https://" teaches them to type nothing at all, so a
+  // token with a dotted host and no scheme of its own gets one. An at sign
+  // before the first slash is a mail address rather than a host.
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(v)) {
+    const host = v.split(/[\/?#]/)[0];
+    if (host.indexOf('@') > 0) v = 'mailto:' + v;
+    else if (/^[^\s@]+\.[a-z]{2,}$/i.test(host)) v = 'https://' + v;
+  }
+  return OUT_SCHEMES.test(v) ? v : '';
+}
+
+/**
+ * Only the inline style attribute is read here, never the computed style.
+ *
+ * Computed style is inherited, so a span inside a strong reports weight 700 and
+ * the walk would wrap it a second time; and it needs a defaultView, which the
+ * inert document the paste path parses into does not have. Gecko's execCommand
+ * writes the declaration onto the element itself, which is exactly what this
+ * sees, so nothing is lost by looking no further.
+ */
+function inlineLook(el) {
+  const st = el.getAttribute && el.getAttribute('style') ? el.style : null;
+  if (!st) return { bold: false, italic: false, underline: false };
+  const w = String(st.fontWeight || '');
+  const dec = String(st.textDecorationLine || st.textDecoration || '');
+  return {
+    bold: w === 'bold' || w === 'bolder' || (parseInt(w, 10) >= 600),
+    italic: st.fontStyle === 'italic' || st.fontStyle === 'oblique',
+    underline: dec.indexOf('underline') >= 0
+  };
+}
+
+/**
+ * The one walk, producing the HTML part and the text part together.
+ *
+ * Together and not in two passes, because the two are alternatives of the same
+ * message and a recipient whose client refuses HTML must be reading the same
+ * letter. Two traversals with two sets of rules is two things to keep in
+ * agreement, and they would stop agreeing on the first edge case.
+ */
+function walkOut(root) {
+  const html = [];
+  const text = [];
+  let listDepth = 0;
+  const counters = [];
+
+  function pushText(s) { text.push(s); }
+
+  function line() {
+    // Blocks end a line, and two blank lines never become three, because a text
+    // alternative full of vertical whitespace reads as a broken conversion.
+    // The last chunk is enough to decide it, and joining the whole array on
+    // every block would make a long paste quadratic in its own length.
+    let tail = '';
+    for (let i = text.length - 1; i >= 0 && !tail; i--) tail = text[i];
+    if (!tail) return;
+    if (/\n\n$/.test(tail)) return;
+    text.push(/\n$/.test(tail) ? '\n' : '\n\n');
+  }
+
+  function inlineWrap(el, depth) {
+    const look = inlineLook(el);
+    let open = '', close = '';
+    if (look.bold) { open += '<strong>'; close = '</strong>' + close; }
+    if (look.italic) { open += '<em>'; close = '</em>' + close; }
+    if (look.underline) { open += '<u>'; close = '</u>' + close; }
+    if (open) html.push(open);
+    kids(el, depth);
+    if (close) html.push(close);
+  }
+
+  function kids(el, depth) {
+    for (let n = el.firstChild; n; n = n.nextSibling) emit(n, depth + 1);
+  }
+
+  function emit(node, depth) {
+    if (depth > 40) return;                       // a paste can be arbitrarily nested
+    if (node.nodeType === 3) {
+      const t = node.nodeValue;
+      if (!t) return;
+      html.push(esc(t));
+      // A non breaking space is a space in a text part. Left as it is it
+      // renders as a stray box in half the terminal mail readers there are.
+      pushText(t.replace(/\u00a0/g, ' '));
+      return;
+    }
+    if (node.nodeType !== 1) return;              // comments and the rest go
+
+    const tag = node.tagName;
+
+    // Word and Google Docs paste elements in their own namespaces, a stylesheet,
+    // and a wrapper that would bold the entire paste. None of that survives.
+    if (tag.indexOf(':') >= 0) return;
+    if (tag === 'STYLE' || tag === 'SCRIPT' || tag === 'XML' || tag === 'META'
+        || tag === 'LINK' || tag === 'TITLE' || tag === 'HEAD') return;
+    // An image is dropped rather than kept, because MailService marks every part
+    // as an attachment and never emits a cid, so an inline image would arrive
+    // broken; and a data: image is blocked by Outlook desktop and eats the 102KB
+    // Gmail clips at. This comes back the day the send path grows multipart/related.
+    if (tag === 'IMG') return;
+
+    if (tag === 'SPAN' || tag === 'FONT') {
+      const look = inlineLook(node);
+      if (hasBlockChild(node)) { kids(node, depth); return; }
+      if (!look.bold && !look.italic && !look.underline) { kids(node, depth); return; }
+      inlineWrap(node, depth);
+      return;
+    }
+    // The wrapper Google Docs puts around everything it copies. Kept as a bold
+    // element it would bold the whole paste.
+    if (tag === 'B' && /font-weight:\s*normal/i.test(node.getAttribute('style') || '')) {
+      kids(node, depth);
+      return;
+    }
+
+    const inline = OUT_INLINE[tag];
+    if (inline === 'br') { html.push('<br>'); pushText('\n'); return; }
+    if (inline === 'a') {
+      const href = outHref(node.getAttribute('href'));
+      if (!href) { kids(node, depth); return; }
+      html.push('<a href="' + escAttr(href) + '" style="' + OUT_STYLE.a + '">');
+      const before = text.length;
+      kids(node, depth);
+      html.push('</a>');
+      // A link whose text is already the address does not need it twice; one
+      // whose text is a word gets the address after it, because a text part with
+      // no URLs in it is a message whose links have been deleted.
+      const label = text.slice(before).join('').trim();
+      if (label && label !== href && href.indexOf(label) < 0) pushText(' <' + href + '>');
+      return;
+    }
+    if (inline) {
+      // A bold that wraps whole paragraphs is unwrapped rather than emitted,
+      // because <strong><p>...</p></strong> is invalid and every client repairs
+      // it differently. Word and Docs both produce exactly that shape.
+      if (hasBlockChild(node)) { kids(node, depth); return; }
+      html.push('<' + inline + '>');
+      kids(node, depth);
+      html.push('</' + inline + '>');
+      return;
+    }
+
+    const block = OUT_BLOCK[tag];
+    if (!block) { kids(node, depth); return; }    // unwrapped, never dropped
+
+    if (block === 'hr') { html.push('<hr style="' + OUT_STYLE.hr + '">'); line(); pushText('----\n\n'); return; }
+
+    const style = OUT_STYLE[block];
+    html.push('<' + block + (style ? ' style="' + style + '"' : '') + '>');
+
+    if (block === 'ul' || block === 'ol') {
+      listDepth++;
+      counters.push(0);
+      line();
+      kids(node, depth);
+      counters.pop();
+      listDepth--;
+    } else if (block === 'li') {
+      const ordered = node.parentNode && node.parentNode.tagName === 'OL';
+      if (ordered && counters.length) counters[counters.length - 1]++;
+      pushText('  '.repeat(Math.max(0, listDepth - 1))
+        + (ordered ? (counters[counters.length - 1] || 1) + '. ' : '- '));
+      kids(node, depth);
+      pushText('\n');
+    } else if (block === 'blockquote') {
+      const before = text.length;
+      kids(node, depth);
+      // Prefixed after the fact, because a quote's own paragraphs have to be
+      // marked line by line and the walk only knows where they are once it is out.
+      const inner = text.splice(before, text.length - before).join('');
+      pushText(inner.replace(/\n$/, '').split('\n').map(l => '> ' + l).join('\n') + '\n\n');
+    } else {
+      kids(node, depth);
+      line();
+    }
+
+    if (!VOID_TAGS.has(block)) html.push('</' + block + '>');
+  }
+
+  kids(root, 0);
+
+  let outHtml = html.join('');
+  // An editable that has only ever held the engine's own placeholder break
+  // serialises to nothing, which is what makes the placeholder rule work.
+  if (!/[^\s]/.test(outHtml.replace(/<[^>]*>/g, ''))
+      && outHtml.indexOf('<hr') < 0 && outHtml.indexOf('<table') < 0) outHtml = '';
+  return { html: outHtml, text: text.join('').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim() };
+}
+
+/**
+ * Pasted or quoted markup to markup this composer owns.
+ *
+ * createHTMLDocument gives a document with no browsing context, so assigning to
+ * its innerHTML builds the tree without running a script, without fetching an
+ * image and without a tracking pixel reaching whoever wrote it. Parsing pasted
+ * markup into the live document, even into a detached node, is the shortcut that
+ * turns a paste into a network request.
+ */
+function cleanForeignHtml(html) {
+  const doc = document.implementation.createHTMLDocument('');
+  try {
+    // The Sanitizer API is deliberately NOT used as a first pass here, and that is
+    // a change of mind against measurement rather than an oversight. Driven at
+    // 390 and 1440 in this Chromium, body.setHTML strips the style attribute
+    // outright, which takes the bold off every run Word and Gecko express as
+    // <span style="font-weight:bold"> and takes the marker off the
+    // <b style="font-weight:normal"> wrapper Google Docs puts around a whole
+    // paste. Pasting a formatted paragraph came back unformatted and the Docs
+    // wrapper came back bolding everything. The walk below is the filter, it
+    // reads the same attribute, and running a pre-pass that deletes its evidence
+    // is worse than not running one.
+    doc.body.innerHTML = String(html || '');
+  } catch (e) {
+    doc.body.textContent = String(html || '');
+  }
+  return walkOut(doc.body);
+}
+
+const EDITOR = {
+  node: null,
+  savedRange: null
+};
+
+function editorNode() { return EDITOR.node || (EDITOR.node = $('cEditor')); }
+
+/**
+ * Issued on every focus rather than once at boot, because both flags are
+ * document scoped in some engines and element scoped in others, and an editor
+ * refocused after the reader pane took focus would otherwise emit spans where it
+ * emitted tags a minute earlier. Both are no-ops where they are unsupported, and
+ * Safari's Enter yields a div whatever is asked, which is why the serialiser
+ * treats div and p as the same block.
+ */
+function pinCommandOutput() {
+  try {
+    document.execCommand('styleWithCSS', false, false);
+    document.execCommand('defaultParagraphSeparator', false, 'p');
+  } catch (e) { /* older engines throw rather than ignore; harmless */ }
+}
+
+function editorValue() { return walkOut(editorNode()); }
+
+function setEditorHtml(html) {
+  const ed = editorNode();
+  // Already rebuilt through the allowlist above, so what is assigned here is
+  // this file's own markup and not anybody else's.
+  ed.innerHTML = html || '';
+  markEditorEmpty();
+}
+
+function markEditorEmpty() {
+  const ed = editorNode();
+  const v = walkOut(ed);
+  ed.setAttribute('data-empty', v.html ? 'false' : 'true');
+}
+
+/**
+ * Read from the caret's ancestors and from computed style rather than from
+ * queryCommandState, which reports the wrong answer whenever a stylesheet has
+ * set a numeric font-weight on the editable, and which is deprecated alongside
+ * the commands it describes. Computed style is what the person can see, and what
+ * they can see is what the button has to agree with.
+ */
+function stateAt() {
+  const ed = editorNode();
+  const sel = window.getSelection();
+  const out = { bold: false, italic: false, underline: false, link: false,
+                insertUnorderedList: false, insertOrderedList: false, quote: false };
+  if (!sel || !sel.rangeCount) return out;
+  let node = sel.getRangeAt(0).startContainer;
+  if (node.nodeType === 3) node = node.parentNode;
+  if (!node || !ed.contains(node)) return out;
+  const cs = window.getComputedStyle(node);
+  out.bold = parseInt(cs.fontWeight, 10) >= 600;
+  out.italic = cs.fontStyle === 'italic' || cs.fontStyle === 'oblique';
+  out.underline = String(cs.textDecorationLine || cs.textDecoration || '').indexOf('underline') >= 0;
+  out.link = !!node.closest('a');
+  out.insertUnorderedList = !!node.closest('ul');
+  out.insertOrderedList = !!node.closest('ol');
+  out.quote = !!node.closest('blockquote');
+  return out;
+}
+
+function paintToolbar() {
+  const st = stateAt();
+  $('fmtBar').querySelectorAll('.fx[aria-pressed]').forEach(b => {
+    const on = !!st[b.dataset.cmd];
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  const link = $('fmtBar').querySelector('[data-cmd="link"]');
+  // The label and not the contents. This button holds a sprite symbol now, and
+  // writing text into it would take the symbol out with it. There is no unlink
+  // glyph in fragments/icons.html, so the pressed state and the name carry the
+  // difference between what it will do and what it did.
+  if (link) {
+    const name = st.link ? 'Remove link' : 'Link';
+    link.setAttribute('aria-label', name);
+    link.setAttribute('title', name);
+  }
+}
+
+/* selectionchange is a document level event that fires on every caret move, so
+   the read is deferred to a frame rather than run once per event. */
+let paintQueued = false;
+document.addEventListener('selectionchange', () => {
+  if (UI.overlay !== 'compose') return;
+  if (paintQueued) return;
+  paintQueued = true;
+  requestAnimationFrame(() => {
+    paintQueued = false;
+    paintToolbar();
+    keepCaretVisible();
+  });
+});
+
+/**
+ * Pulls the caret above the docked format bar.
+ *
+ * The editable is its own scroll container, so block:'nearest' scrolls exactly
+ * it and nothing else on the page moves. Without this the caret walks down
+ * behind the bar as the message grows and the person is typing blind.
+ */
+function keepCaretVisible() {
+  const ed = editorNode();
+  if (document.activeElement !== ed) return;
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return;
+  let node = sel.getRangeAt(0).startContainer;
+  if (node.nodeType === 3) node = node.parentNode;
+  if (!node || !ed.contains(node) || !node.scrollIntoView) return;
+  try { node.scrollIntoView({ block: 'nearest' }); } catch (e) { /* older engines */ }
+}
+
+function saveRange() {
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount && editorNode().contains(sel.getRangeAt(0).startContainer)) {
+    EDITOR.savedRange = sel.getRangeAt(0).cloneRange();
+  }
+}
+
+function restoreRange() {
+  const ed = editorNode();
+  ed.focus();
+  if (!EDITOR.savedRange) return;
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(EDITOR.savedRange);
+}
+
+function insertHtmlAtCaret(fragmentHtml) {
+  if (!fragmentHtml) return;
+  // insertHTML rather than Range surgery, for the one property execCommand still
+  // has that nothing replaces: the paste lands on the undo stack, so Ctrl+Z takes
+  // it back out. The Range path below is correct and loses that, which is why it
+  // is the fallback and not the default.
+  let done = false;
+  try { done = document.execCommand('insertHTML', false, fragmentHtml); } catch (e) { done = false; }
+  if (!done) {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return;
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    const tpl = document.createElement('template');
+    tpl.innerHTML = fragmentHtml;
+    const frag = tpl.content;
+    const last = frag.lastChild;
+    range.insertNode(frag);
+    if (last) {
+      range.setStartAfter(last);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  }
+  markEditorEmpty();
+  onComposeInput();
+}
+
+function runCommand(cmd) {
+  const ed = editorNode();
+  ed.focus();
+  pinCommandOutput();
+  if (cmd === 'quote') {
+    // formatBlock is the only way to reach a blockquote without a document model,
+    // and the argument needs the angle brackets on the engines that predate the
+    // bare form.
+    try { document.execCommand('formatBlock', false, '<blockquote>'); }
+    catch (e) { document.execCommand('formatBlock', false, 'blockquote'); }
+  } else if (cmd === 'removeFormat') {
+    document.execCommand('removeFormat', false, null);
+    document.execCommand('unlink', false, null);
+  } else {
+    document.execCommand(cmd, false, null);
+  }
+  markEditorEmpty();
+  paintToolbar();
+  onComposeInput();
+}
+
+function openLinkRow() {
+  const st = stateAt();
+  if (st.link) { runCommand('unlink'); return; }
+  saveRange();
+  const row = $('linkRow');
+  row.hidden = false;
+  const box = $('linkUrl');
+  box.value = '';
+  focusSoon(box);
+}
+
+function closeLinkRow(refocus) {
+  $('linkRow').hidden = true;
+  if (refocus) restoreRange();
+}
+
+function applyLink() {
+  const href = outHref($('linkUrl').value);
+  if (!href) {
+    toast('That does not look like a web address. Start it with https:// .', true);
+    return;
+  }
+  restoreRange();
+  $('linkRow').hidden = true;
+  const sel = window.getSelection();
+  const collapsed = !sel || !sel.rangeCount || sel.getRangeAt(0).collapsed;
+  if (collapsed) {
+    // Nothing selected, so the address becomes its own label. Inserting a bare
+    // createLink on a collapsed caret does nothing at all in every engine.
+    insertHtmlAtCaret('<a href="' + escAttr(href) + '">' + esc(href) + '</a>');
+  } else {
+    document.execCommand('createLink', false, href);
+  }
+  markEditorEmpty();
+  paintToolbar();
+  onComposeInput();
+}
+
+/* mousedown and not click. A toolbar button that takes focus kills the selection
+   before the command runs, which works on the first press and then silently
+   formats nothing for the rest of the session. */
+$('fmtBar').addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
+$('fmtBar').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-cmd]');
+  if (!btn) return;
+  const cmd = btn.dataset.cmd;
+  if (cmd === 'link') { openLinkRow(); return; }
+  runCommand(cmd);
+});
+$('linkAdd').addEventListener('click', applyLink);
+$('linkCancel').addEventListener('click', () => closeLinkRow(true));
+$('linkUrl').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); applyLink(); }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeLinkRow(true); }
+});
+
+/* The clipboard's text/html is raw: getData does not sanitise, only the async
+   clipboard read does, and this is the path a Ctrl+V takes, so nothing here may
+   assume the browser already looked. Shift is the universal paste-without-
+   formatting gesture and is honoured, because the alternative is people pasting a
+   web page and then hunting through a menu for the way to undo it. */
+editorNode().addEventListener('paste', e => {
+  const dt = e.clipboardData;
+  if (!dt) return;
+  e.preventDefault();
+  const html = dt.getData('text/html');
+  const text = dt.getData('text/plain');
+  if (e.shiftKey || !html) {
+    insertHtmlAtCaret(esc(text).replace(/\r?\n/g, '<br>'));
+    return;
+  }
+  const clean = cleanForeignHtml(html);
+  insertHtmlAtCaret(clean.html || esc(text).replace(/\r?\n/g, '<br>'));
+});
+
+/* Drop is the same vector arriving through a different door, and it is the one
+   people forget. Files dropped on the editable are left to the sheet's own drop
+   handler, which stages them as attachments. */
+editorNode().addEventListener('drop', e => {
+  const dt = e.dataTransfer;
+  if (!dt) return;
+  if (Array.from(dt.types || []).indexOf('Files') >= 0) return;
+  e.preventDefault();
+  const html = dt.getData('text/html');
+  const clean = html ? cleanForeignHtml(html) : null;
+  insertHtmlAtCaret((clean && clean.html) || esc(dt.getData('text/plain')).replace(/\r?\n/g, '<br>'));
+});
+
+editorNode().addEventListener('input', () => { markEditorEmpty(); onComposeInput(); });
+/**
+ * Puts the message field at the top of the sheet on a phone.
+ *
+ * The sheet is 844px tall and the software keyboard takes 300 of them, so the
+ * recipients, the subject and the attach row together leave the writing area a
+ * slot about a hundred pixels deep, which is four lines. Somebody who has just
+ * put the caret in the body is not looking at any of those rows, so they are
+ * scrolled off the top and the letter gets the whole remaining screen. One swipe
+ * down brings every one of them back, and nothing is hidden that was not.
+ *
+ * Called from the focus AND from dockToKeyboard, which is not belt and braces:
+ * at the moment of focus the sheet has not shrunk yet and there is nothing to
+ * scroll, and the shrink arrives a frame or two later with the keyboard.
+ */
+function revealWritingArea() {
+  if (!mqPhone.matches) return;
+  if (document.activeElement !== editorNode()) return;
+  const field = document.querySelector('#composeSheet .field-msg');
+  const holder = $('composeBody');
+  if (!field || !holder) return;
+  // Written straight onto scrollTop rather than through scrollIntoView. The two
+  // rectangles are read first, which forces the layout the keyboard has just
+  // changed to settle; scrollIntoView issued in the same frame as the resize was
+  // measured doing nothing at all, and it can also scroll the window, which on a
+  // fixed sheet is a move nothing on screen accounts for.
+  const delta = field.getBoundingClientRect().top - holder.getBoundingClientRect().top;
+  if (delta > 1) holder.scrollTop += delta;
+}
+
+editorNode().addEventListener('focus', () => {
+  pinCommandOutput();
+  requestAnimationFrame(revealWritingArea);
+});
+
+/* =========================================================================
+   The format bar over the software keyboard
+
+   The phone is the primary surface and the toolbar is the control most likely
+   to be got wrong on it: parked at the bottom of the sheet it disappears under
+   the keyboard, and floated over the text it hides the words being formatted.
+
+   It is docked instead, in the flow, immediately above the keyboard's own top
+   edge. The keyboard's height is not something a page can be told directly; the
+   only report of it is visualViewport, and only on iOS, where the layout
+   viewport does not shrink at all. Android Chrome shrinks the layout viewport
+   instead, which makes the number below zero and puts the bar at the bottom of
+   an already shortened screen, which is the same place.
+   ========================================================================= */
+
+function dockToKeyboard() {
+  const dock = $('fmtDock');
+  if (!dock) return;
+  const vv = window.visualViewport;
+  if (!vv || !mqPhone.matches || UI.overlay !== 'compose') {
+    dock.style.marginBottom = '';
+    dock.removeAttribute('data-kb');
+    return;
+  }
+  // offsetTop matters: iOS scrolls the visual viewport up inside the layout one
+  // rather than resizing the page, so the covered band is what is left over
+  // after both the height difference and that offset are taken out.
+  const covered = window.innerHeight - vv.height - vv.offsetTop;
+  // A threshold, because the address bar collapsing is also a visual viewport
+  // change and is not a keyboard. No keyboard is under 120px on a phone.
+  const kb = covered > 120 ? Math.round(covered) : 0;
+  dock.style.marginBottom = kb ? kb + 'px' : '';
+  if (kb) dock.setAttribute('data-kb', '1'); else dock.removeAttribute('data-kb');
+  // Next frame, not this one. The margin above has only just been written, so
+  // the sheet body is still its old height and has nothing to scroll yet; a
+  // reveal issued here measures the layout the keyboard has already replaced.
+  if (kb) requestAnimationFrame(() => { revealWritingArea(); keepCaretVisible(); });
+}
+
+/* The fade at the right edge is there to say the bar scrolls, so it has to come
+   off when it does not, or a bar that fits ends in a gradient for no reason. */
+function measureToolbar() {
+  const bar = $('fmtBar');
+  if (!bar) return;
+  bar.classList.toggle('fits', bar.scrollWidth <= bar.clientWidth + 1);
+}
+window.addEventListener('resize', measureToolbar);
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', dockToKeyboard);
+  window.visualViewport.addEventListener('scroll', dockToKeyboard);
+}
+
+/* =========================================================================
+   Compose state
+   ========================================================================= */
+
+/**
+ * Everything the composer is currently about, beyond the fields themselves.
+ *
+ * replyTo and forwardOf are parent message ids and never header values. The
+ * server derives In-Reply-To and References from the parent it loads itself,
+ * because a browser that can name the header is a browser that can forge one
+ * into somebody else's thread.
+ */
+const COMPOSE = { replyTo: null, forwardOf: null, keep: [] };
+
+/* The draft this composer is attached to. id is the Drafts mailbox message id
+   the server answered with, and it is the only durable state; everything else
+   here exists to keep the saving line honest. */
+const DRAFT = { id: null, timer: null, saving: false, savedAt: null, seed: '', failed: false, queued: false };
+
+const DRAFT_DEBOUNCE = 3000;
+
 function composeFingerprint() {
   /* The files are part of it. Attaching a report and then closing the sheet used
      to be a silent loss, because the four text boxes were unchanged and the
      discard question never fired. */
-  return JSON.stringify([$('cTo').value, $('cCc').value, $('cSubject').value, $('cBody').value,
-    S.files.map(f => f.name + ':' + f.size)]);
+  return JSON.stringify([
+    cTo.serialise(), cCc.serialise(), cBcc.serialise(),
+    $('cSubject').value, editorValue().html,
+    S.files.map(f => f.name + ':' + f.size),
+    COMPOSE.keep.map(k => k.blobId)
+  ]);
 }
 
 /* Dirty means changed since it was opened, not merely non-empty: a reply is
@@ -1108,26 +2214,266 @@ function composeFingerprint() {
    fastest way to teach people to ignore the question. */
 function composeDirty() { return composeFingerprint() !== S.composeSeed; }
 
+/** True when there is anything at all worth keeping. */
+function composeHasContent() {
+  return !!(cTo.items.length || cCc.items.length || cBcc.items.length
+    || $('cSubject').value.trim() || editorValue().html || S.files.length);
+}
+
+/* One entry point for every edit, so the draft timer, the placeholder and the
+   Send button cannot get out of step with each other by being updated in some
+   places and not in others. */
+function onComposeInput() {
+  markEditorEmpty();
+  scheduleDraft();
+  // Discard has to appear as soon as there is something to discard, rather than
+  // three seconds later when the first save happens to land.
+  renderDraftState(DRAFT.savedAt ? 'pending' : undefined);
+}
+
 function clearCompose() {
-  $('cTo').value = '';
-  $('cCc').value = '';
+  cTo.set([]);
+  cCc.set([]);
+  cBcc.set([]);
   $('cSubject').value = '';
-  $('cBody').value = '';
+  setEditorHtml('');
   S.files = [];
+  COMPOSE.replyTo = null;
+  COMPOSE.forwardOf = null;
+  COMPOSE.keep = [];
+  DRAFT.id = null;
+  DRAFT.savedAt = null;
+  DRAFT.failed = false;
+  DRAFT.seed = '';
+  clearTimeout(DRAFT.timer);
+  showCcBcc(false);
   renderFiles();
+  renderDraftState();
+  $('composeTitle').textContent = 'New message';
   S.composeSeed = composeFingerprint();
 }
 
-function openCompose(to, subject, body, cc) {
+function showCcBcc(on) {
+  $('fldCc').hidden = !on;
+  $('fldBcc').hidden = !on;
+  $('btnCcBcc').setAttribute('aria-expanded', on ? 'true' : 'false');
+  $('btnCcBcc').hidden = !!on;
+}
+
+/**
+ * Opens the composer.
+ *
+ * With no arguments it reopens whatever is already in the sheet rather than
+ * wiping it, because closing the composer now saves a draft instead of asking
+ * whether to throw one away, and a Compose button that silently discarded the
+ * thing it had just saved would be the worst of both. A new message is what you
+ * get after a send or after Discard.
+ */
+function openCompose(seed) {
   if (!can('MAIL_SEND')) return;
-  $('cTo').value = to || '';
-  $('cCc').value = cc || '';
-  $('cSubject').value = subject || '';
-  $('cBody').value = body || '';
-  S.files = [];
-  renderFiles();
-  S.composeSeed = composeFingerprint();
+  if (seed) {
+    // A reply started on top of an unfinished message files that message rather
+    // than throwing it away, because Reply is not a discard gesture and nobody
+    // expects it to be one.
+    if (composeHasContent() && composeDirty()) saveDraft('replaced');
+    clearCompose();
+    cTo.set(seed.to || []);
+    cCc.set(seed.cc || []);
+    cBcc.set(seed.bcc || []);
+    $('cSubject').value = seed.subject || '';
+    setEditorHtml(seed.html || '');
+    COMPOSE.replyTo = seed.replyTo || null;
+    COMPOSE.forwardOf = seed.forwardOf || null;
+    COMPOSE.keep = seed.keep || [];
+    DRAFT.id = seed.draftId || null;
+    if (seed.draftId) {
+      DRAFT.savedAt = seed.savedAt ? new Date(seed.savedAt) : null;
+      $('composeTitle').textContent = 'Draft';
+    }
+    if ((seed.cc && seed.cc.length) || (seed.bcc && seed.bcc.length)) showCcBcc(true);
+    renderFiles();
+    renderDraftState();
+    S.composeSeed = composeFingerprint();
+    DRAFT.seed = S.composeSeed;
+  }
   goOverlay('compose');
+  acWarm();
+  requestAnimationFrame(() => { dockToKeyboard(); measureToolbar(); });
+}
+
+/* =========================================================================
+   Drafts
+
+   The Drafts mailbox is the store. A Postgres table for this would be a second
+   copy of a thing the mail server already owns, and it would disagree with the
+   phone's IMAP client the first time somebody deleted a draft there.
+
+   Attachments are deliberately NOT part of an autosave. Staging a file uploads
+   nothing until send, and moving that upload to attach time is a change to the
+   send endpoint that this file does not own. Until it lands the saving line says
+   so out loud rather than implying files are safe.
+   ========================================================================= */
+
+function scheduleDraft() {
+  if (!can('MAIL_SEND')) return;
+  clearTimeout(DRAFT.timer);
+  if (DRAFT.savedAt || DRAFT.failed) renderDraftState('pending');
+  DRAFT.timer = setTimeout(() => saveDraft('timer'), DRAFT_DEBOUNCE);
+}
+
+function draftFields() {
+  const v = editorValue();
+  return {
+    // id, not draftId. POST /draft names it id and POST /send names it draftId,
+    // and they are two different endpoints rather than one shape used twice.
+    id: DRAFT.id || '',
+    to: cTo.serialise(),
+    cc: cCc.serialise(),
+    bcc: cBcc.serialise(),
+    subject: $('cSubject').value,
+    body: v.text,
+    html: v.html,
+    replyTo: COMPOSE.replyTo || '',
+    forwardOf: COMPOSE.forwardOf || ''
+  };
+}
+
+async function saveDraft(reason) {
+  clearTimeout(DRAFT.timer);
+  if (!can('MAIL_SEND')) return;
+  if (S.sending) return;                       // a send is about to destroy it anyway
+  if (!composeHasContent()) return;
+  const print = composeFingerprint();
+  if (print === DRAFT.seed && DRAFT.id) return;   // nothing has changed since the last save
+  if (DRAFT.saving) { DRAFT.queued = true; return; }
+
+  DRAFT.saving = true;
+  renderDraftState('saving');
+  try {
+    const r = await post('/api/mail/draft', draftFields());
+    DRAFT.id = r.id || DRAFT.id;
+    DRAFT.savedAt = r.savedAt ? new Date(r.savedAt) : new Date();
+    DRAFT.seed = print;
+    DRAFT.failed = false;
+    if ($('composeTitle').textContent === 'New message') $('composeTitle').textContent = 'Draft';
+  } catch (e) {
+    // A locked mailbox mid-autosave must not throw the unlock sheet over
+    // somebody's typing. The line says it failed and the next edit tries again.
+    DRAFT.failed = true;
+  } finally {
+    DRAFT.saving = false;
+    renderDraftState();
+    if (DRAFT.queued) { DRAFT.queued = false; saveDraft('queued'); }
+  }
+}
+
+/**
+ * The last save, for a tab that is going away.
+ *
+ * fetch with keepalive and XHR both lose the race against a closing document,
+ * and beforeunload cannot await anything. sendBeacon is the only request a
+ * browser promises to finish, and it cannot set a header, so the CSRF token
+ * travels as the _csrf parameter Spring Security reads by default. The blob
+ * carries the form content type explicitly, because a URLSearchParams handed
+ * straight to sendBeacon goes out as text/plain and no form binder would see it.
+ */
+function beaconDraft() {
+  if (!can('MAIL_SEND') || UI.overlay !== 'compose') return;
+  if (!composeHasContent()) return;
+  if (composeFingerprint() === DRAFT.seed && DRAFT.id) return;
+  if (!navigator.sendBeacon) return;
+  const params = new URLSearchParams(draftFields());
+  // forwardOf is not a parameter POST /draft takes, and a URLSearchParams built
+  // from the same object would carry it into a beacon nobody can see fail.
+  params.delete('forwardOf');
+  params.append('_csrf', csrfToken());
+  try {
+    navigator.sendBeacon('/api/mail/draft',
+      new Blob([params.toString()], { type: 'application/x-www-form-urlencoded' }));
+  } catch (e) { /* nothing left to do from a page that is closing */ }
+}
+
+window.addEventListener('pagehide', beaconDraft);
+document.addEventListener('visibilitychange', () => {
+  // hidden is the state a phone reaches when the app is switched away from, and
+  // on iOS it is frequently the last state a page is ever in.
+  if (document.visibilityState === 'hidden') beaconDraft();
+});
+
+function renderDraftState(phase) {
+  const el = $('draftState');
+  const wrap = $('fmtGroup');
+  let text = '';
+  let bad = false;
+  if (phase === 'saving') text = 'Saving';
+  else if (DRAFT.failed) { text = 'Not saved. It will try again as you type.'; bad = true; }
+  else if (phase === 'pending' && DRAFT.savedAt) text = 'Saved ' + hhmm(DRAFT.savedAt) + ', editing';
+  else if (DRAFT.savedAt) text = 'Saved to Drafts ' + hhmm(DRAFT.savedAt);
+  // Said out loud rather than implied, because a person who has watched a
+  // saving line appear will reasonably assume the file went with it.
+  if (text && S.files.length) text += '. Attachments are not saved yet.';
+  el.textContent = text;
+  el.classList.toggle('bad', bad);
+  const show = !!text || (!!DRAFT.id || composeHasContent());
+  wrap.setAttribute('data-draft', show ? '1' : '0');
+  $('btnDiscard').hidden = !(DRAFT.id || composeHasContent());
+}
+
+function hhmm(d) {
+  return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+async function discardDraft() {
+  if (!window.confirm('Throw this message away?')) return;
+  const id = DRAFT.id;
+  clearCompose();
+  if (UI.overlay === 'compose') history.back();
+  if (id) {
+    try { await post('/api/mail/draft/delete', { id: id }); }
+    catch (e) { if (!handled(e)) toast(e.message, true); }
+  }
+}
+
+/**
+ * A row in the Drafts folder opens the composer, not the reader.
+ *
+ * The body comes back as the reader's standalone document, which is already
+ * sanitised, so it is parsed into an inert document and rebuilt through the same
+ * walk everything else goes through rather than being trusted as markup.
+ */
+async function resumeDraft(id) {
+  let m;
+  try {
+    m = await api('/api/mail/draft?id=' + encodeURIComponent(id));
+  } catch (e) {
+    if (!handled(e)) toast(e.message, true);
+    return;
+  }
+  // GET /draft and not GET /message. The two answer different questions: /message
+  // returns a standalone sanitised document for the reader's iframe, which is not
+  // something a contenteditable can hold, and it does not carry Bcc at all. This
+  // one returns editable HTML and every header the composer had. It is still run
+  // through the walk here, because a draft in that folder may have been written by
+  // any client holding the mailbox password.
+  const body = cleanForeignHtml(m.html || '');
+  openCompose({
+    to: (m.to || []).map(a => ({ name: a.name, email: a.email })),
+    cc: (m.cc || []).map(a => ({ name: a.name, email: a.email })),
+    bcc: (m.bcc || []).map(a => ({ name: a.name, email: a.email })),
+    subject: m.subject || '',
+    html: body.html,
+    draftId: id,
+    savedAt: null,
+    keep: (m.attachments || []).map(a => ({ blobId: a.blobId, name: a.name, size: a.size }))
+  });
+}
+
+/** The <body> of a reader document, as a string, without parsing it here. */
+function bodyFragmentOf(doc) {
+  const s = String(doc || '');
+  const open = s.indexOf('<body>');
+  const close = s.lastIndexOf('</body>');
+  return open >= 0 && close > open ? s.slice(open + 6, close) : s;
 }
 
 /* ---------- attachments on the compose sheet ---------- */
@@ -1210,7 +2556,19 @@ function renderFiles() {
   const total = stagedBytes();
   const over = total > S.attachLimit;
 
-  $('fileList').innerHTML = S.files.map((f, i) =>
+  /* A forwarded file is drawn in the same list as a staged one, because to the
+     person writing the message they are the same thing: something that will go
+     out with it and can be taken back off. They differ only in where the bytes
+     are, which is why the kept ones do not count towards the upload budget. */
+  const kept = COMPOSE.keep.map((k, i) =>
+    '<li class="frow kept">'
+    + icon('i-attach', 'ic-sm')
+    + '<span class="nm">' + esc(k.name || 'attachment') + '</span>'
+    + '<span class="sz">' + esc(bytes(k.size) || '') + ' forwarded</span>'
+    + '<button class="pib rm" type="button" data-rmkeep="' + i + '" aria-label="Do not forward '
+    + esc(k.name || 'this file') + '">' + icon('i-close') + '</button></li>').join('');
+
+  $('fileList').innerHTML = kept + S.files.map((f, i) =>
     '<li class="frow">'
     + icon('i-attach', 'ic-sm')
     + '<span class="nm">' + esc(f.name) + '</span>'
@@ -1230,6 +2588,7 @@ function renderFiles() {
   // Only the over-limit case disables Send. An in-flight send disables it too,
   // and that is set and cleared by sendMessage rather than here.
   if (!S.sending) $('btnSend').disabled = over;
+  renderDraftState();
 }
 
 /** Send has one label node and one fill node, and neither is the button itself. */
@@ -1303,35 +2662,116 @@ function upload(url, form, onProgress) {
   });
 }
 
-function quoteOf(m) {
-  return '\n\nOn ' + fullWhen(m.receivedAt) + ', '
-    + (m.from.display || m.from.email) + ' wrote:\n> (original message)';
+/* =========================================================================
+   Reply, reply all and forward
+
+   The quoted body is the real one. It used to be the literal string
+   "> (original message)", which meant every reply this app has ever sent quoted
+   nothing at all; and no In-Reply-To or References header was written, so every
+   one of them opened a new thread in the recipient's client. Both are defects
+   rather than missing features.
+
+   The quote is built from the reader document the server already sanitised,
+   parsed into an inert document and rebuilt through the same allowlist as a
+   paste. The headers are NOT built here: the parent's id goes up and the server
+   loads it and derives them, because a browser that can name a Message-ID is a
+   browser that can drop a forged reply into somebody else's thread.
+   ========================================================================= */
+
+function attributionOf(m) {
+  return 'On ' + fullWhen(m.receivedAt) + ', ' + (m.from.display || m.from.email) + ' wrote:';
+}
+
+/** The quoted original, as the markup the composer will hold. */
+function quoteBlockOf(m) {
+  const inner = cleanForeignHtml(bodyFragmentOf(m.bodyHtml));
+  return '<p><br></p><p>' + esc(attributionOf(m)) + '</p>'
+    + '<blockquote class="jq">' + (inner.html || '<p></p>') + '</blockquote>';
 }
 
 function replyTo(m, all) {
   const subject = /^re:/i.test(m.subject || '') ? m.subject : 'Re: ' + (m.subject || '');
-  let cc = '';
+  const mine = String(S.mailbox || ME.email || '').toLowerCase();
+  const from = (m.from.email || '').toLowerCase();
+  let cc = [];
   if (all) {
-    const mine = String(S.mailbox || ME.email || '').toLowerCase();
-    const others = [].concat(m.to || [], m.cc || [])
-      .map(a => a.email)
-      .filter(a => a && a.toLowerCase() !== mine && a.toLowerCase() !== (m.from.email || '').toLowerCase());
-    cc = Array.from(new Set(others)).join(', ');
+    const seen = new Set([mine, from]);
+    [].concat(m.to || [], m.cc || []).forEach(a => {
+      const e = String(a.email || '').toLowerCase();
+      if (!e || seen.has(e)) return;
+      seen.add(e);
+      cc.push({ name: a.name || '', email: a.email });
+    });
   }
-  openCompose(m.from.email, subject, quoteOf(m), cc);
+  openCompose({
+    to: [{ name: m.from.name || '', email: m.from.email }],
+    cc: cc,
+    subject: subject,
+    // The signature would go here, above the quote, the day identities are
+    // exposed to this screen. Nothing is invented in its place.
+    html: quoteBlockOf(m),
+    replyTo: m.id
+  });
+  // The caret belongs at the top, above the quote, which is where every client
+  // puts it and where the reply is actually written.
+  focusSoon(editorNode());
+  requestAnimationFrame(caretToStart);
 }
 
 function forwardOf(m) {
   const subject = /^fwd:/i.test(m.subject || '') ? m.subject : 'Fwd: ' + (m.subject || '');
-  const head = '\n\n---------- Forwarded message ----------\nFrom: '
-    + (m.from.display || m.from.email) + '\nDate: ' + fullWhen(m.receivedAt)
-    + '\nSubject: ' + (m.subject || '(no subject)')
-    + '\n\n(original message)';
-  openCompose('', subject, head);
+  const rows = [
+    ['From', m.from.display || m.from.email],
+    ['Date', fullWhen(m.receivedAt)],
+    ['Subject', m.subject || '(no subject)'],
+    ['To', (m.to || []).map(a => a.display || a.email).join(', ')]
+  ].filter(r => r[1]);
+  const head = '<p><br></p><p>' + esc('---------- Forwarded message ----------') + '</p><p>'
+    + rows.map(r => '<strong>' + esc(r[0]) + ':</strong> ' + esc(r[1])).join('<br>')
+    + '</p>';
+  const inner = cleanForeignHtml(bodyFragmentOf(m.bodyHtml));
+  openCompose({
+    subject: subject,
+    html: head + '<blockquote class="jq">' + (inner.html || '<p></p>') + '</blockquote>',
+    forwardOf: m.id,
+    // The parent's blobs, named rather than downloaded and re-uploaded. They are
+    // blobs in the same account, so the send can reference them directly; this
+    // list is what tells it which ones survived the writer's second thoughts.
+    keep: (m.attachments || []).map(a => ({ blobId: a.blobId, name: a.name, size: a.size }))
+  });
+  focusSoon(editorNode());
+  requestAnimationFrame(caretToStart);
+}
+
+function caretToStart() {
+  const ed = editorNode();
+  if (document.activeElement !== ed) return;
+  const range = document.createRange();
+  range.setStart(ed, 0);
+  range.collapse(true);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  ed.scrollTop = 0;
 }
 
 async function sendMessage() {
   if (S.sending) return;                       // a second tap must not start a second send
+
+  // Refused here rather than by the server, because a mistyped address that only
+  // fails after a two minute upload is a mistyped address nobody can correct.
+  const wrong = [].concat(cTo.bad(), cCc.bad(), cBcc.bad());
+  if (wrong.length) {
+    toast(wrong[0].email + ' is not an email address. Fix it or take it off before sending.', true);
+    const owner = CHIPS.find(f => f.bad().length);
+    if (owner) owner.input.focus();
+    return;
+  }
+  if (!cTo.items.length && !cCc.items.length && !cBcc.items.length) {
+    toast('Add at least one recipient.', true);
+    cTo.input.focus();
+    return;
+  }
 
   const total = stagedBytes();
   if (total > S.attachLimit) {
@@ -1341,13 +2781,24 @@ async function sendMessage() {
     return;
   }
 
+  const written = editorValue();
   const fields = {
-    to: $('cTo').value,
-    cc: $('cCc').value,
+    to: cTo.serialise(),
+    cc: cCc.serialise(),
+    bcc: cBcc.serialise(),
     subject: $('cSubject').value,
-    body: $('cBody').value
+    // Both parts, always. A text/plain alternative is what makes the message
+    // render in a client that refuses HTML, and its absence is one of the
+    // cheapest things a spam filter scores against.
+    body: written.text,
+    html: written.html,
+    replyTo: COMPOSE.replyTo || '',
+    forwardOf: COMPOSE.forwardOf || '',
+    keepAttachments: COMPOSE.keep.map(k => k.blobId).join(','),
+    draftId: DRAFT.id || ''
   };
 
+  clearTimeout(DRAFT.timer);
   sendChrome(S.files.length ? 'Uploading' : 'Sending', 0, true);
   try {
     let result;
@@ -1368,11 +2819,14 @@ async function sendMessage() {
         else sendChrome('Uploading ' + Math.round(fraction * 100) + '%', fraction, true);
       });
     }
-    // Cleared before the pop, so the unsaved-text question does not fire on a
-    // message that has already gone out.
+    // Cleared before the pop, so neither the autosave nor the close handler can
+    // file a draft for a message that has already gone out.
     clearCompose();
     if (UI.overlay === 'compose') history.back();
     toast(result.message || 'Sent.');
+    // The draft this came from is destroyed by the send, so a Drafts folder on
+    // screen is now one row out of date.
+    if (S.folderRole === 'drafts') loadMessages(true);
   } catch (e) {
     if (!handled(e)) toast(e.message, true);
   } finally {
@@ -1486,9 +2940,31 @@ $('cFiles').addEventListener('change', e => {
 });
 
 $('fileList').addEventListener('click', e => {
+  const keep = e.target.closest('[data-rmkeep]');
+  if (keep) {
+    COMPOSE.keep.splice(Number(keep.dataset.rmkeep), 1);
+    renderFiles();
+    onComposeInput();
+    return;
+  }
   const b = e.target.closest('[data-rm]');
   if (b) removeFile(Number(b.dataset.rm));
 });
+
+/* ---------- compose wiring ---------- */
+
+/* Built once, after the whole file has loaded, because each one reaches for its
+   own nodes at construction. The array is what lets a duplicate be folded across
+   all three fields rather than only within the one being typed into. */
+cTo = new ChipField('cTo', 'cToField', 'to');
+cCc = new ChipField('cCc', 'cCcField', 'cc');
+cBcc = new ChipField('cBcc', 'cBccField', 'bcc');
+CHIPS = [cTo, cCc, cBcc];
+CHIPS.forEach(f => { f.input.dataset.ph = f.input.placeholder; });
+
+$('btnCcBcc').addEventListener('click', () => { showCcBcc(true); focusSoon(cCc.input); });
+$('btnDiscard').addEventListener('click', discardDraft);
+$('cSubject').addEventListener('input', onComposeInput);
 
 /* Drop anywhere on the compose sheet, not only on the attach row. The row is a
    40px strip at the bottom of a full height sheet, and a file dragged from a
@@ -1526,7 +3002,21 @@ document.addEventListener('keydown', e => {
   // The unlock sheet deliberately has no dismiss: there is nothing behind it.
   if (e.key !== 'Escape') return;
   if ($('unlockSheet').classList.contains('open')) return;
+  // The link row and the contact menu are layers inside the compose sheet rather
+  // than states in the history machine, so Escape has to take them off before it
+  // reaches the sheet they are on. Otherwise one Escape closes the whole message
+  // to dismiss a menu.
+  if (!$('linkRow').hidden) { closeLinkRow(true); return; }
+  if (!$('acMenu').hidden) { acClose(); return; }
   if (UI.overlay) history.back();
+});
+
+/* Ctrl+Enter and Cmd+Enter send, from anywhere on the compose sheet. It is the
+   one shortcut every mail client agrees on and the only one bound here. */
+$('composeSheet').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' || !(e.ctrlKey || e.metaKey)) return;
+  e.preventDefault();
+  sendMessage();
 });
 
 if (ME.email) identify(ME.email);
@@ -1548,6 +3038,7 @@ if (!can('MAIL_SEND')) {
   const wantsCompose = location.hash === '#compose';
   history.replaceState({ jm: BASE }, '', location.pathname + location.search);
   placeChrome();
+  clearCompose();
   applyState(BASE);
   setReaderChrome(false);
   emptyReader();

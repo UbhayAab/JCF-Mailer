@@ -1009,6 +1009,356 @@ pre.code .c { color: var(--text-mute); }
 .dns-value { font-size: var(--fs-sm); color: var(--text-dim); word-break: break-all; line-height: 1.5; padding: 1px 0; }
 
 /* ==========================================================================
+   PHASE 2 SURFACES
+
+   Seven components the mailbox work needs at once: recipient chips, the compose
+   formatting toolbar, the bulk selection bar, the checkbox column on a message
+   row, the keyboard shortcut sheet, the dropdown menu and the send later
+   picker. They are written here, once, so that agents working in parallel
+   inherit one set of measurements instead of each inventing a chip.
+
+   Two facts shaped the rules below and are worth stating before the first
+   declaration, because they explain choices that otherwise look arbitrary.
+
+   The first is that templates/mail.html does not link this file. It carries its
+   own copy of the token block and its own components, so a rule written here
+   reaches the console and nothing else until somebody lifts this section into
+   that page. This section is written to survive that move, and the move needs
+   exactly one thing done first: mail.html's :root has to gain the type scale
+   (--fs-body, --fs-sm, --fs-cap, --fs-over, --lh-over), the 4px spacing scale
+   (--sp-1 to --sp-7), --r-full, --field and --field-focus. Section 14.3 already
+   sends tokens that way, so this is the same kind of ask and not a new one.
+   What this section will not do is name --panel-2, which is #252525 here and
+   #1c1c1c there. That token is lighter than --panel in the console and darker
+   than --panel in the mailbox, so a popover grounded on it would arrive raised
+   on one page and sunken on the other. Popovers here are grounded on --panel-3,
+   which means the same thing in both.
+
+   The second is section 8. Below 900px every control here is 44px in at least
+   one dimension and 44x44 where it is a square, and where the visual has to
+   stay small - the remove button on a 34px chip, a checkbox beside 12.5px
+   text - the hit area grows through a transparent pseudo element rather than
+   the glyph growing. The breakpoint is 899.98px and not 900px for the reason
+   section 14.3 gives: max-width:900px and min-width:900px both match at exactly
+   900.
+   ========================================================================== */
+
+/* ---------- recipient chips ----------
+   A recipient is something you can point at and take back off again, not a
+   substring of one comma separated line. The committed addresses sit in front
+   of the input as its siblings inside the same bordered box, so the field's
+   label still points at one real input and every address still owns a tap
+   target of its own.
+
+   .chip is scoped under .chips throughout. The console already ships a .chip of
+   its own for merge tags, in a mono face at 11.5px, and an unscoped rule here
+   would repaint every merge tag in the template editor. */
+.chips {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: 100%;
+  min-height: 34px; padding: 4px 6px; cursor: text; position: relative;
+  background: var(--field); border: 1px solid var(--border-strong);
+  border-radius: var(--r-xs);
+  transition: border-color var(--t-fast), box-shadow var(--t-fast), background var(--t-fast);
+}
+/* :focus-within covers the entry box and the chip buttons alike; the .focus
+   class exists for the case where script has to hold the state open across a
+   click on an autocomplete row, which moves focus out of the box for a frame. */
+.chips:focus-within, .chips.focus {
+  border-color: var(--primary); background: var(--field-focus);
+  box-shadow: 0 0 0 2px rgba(47, 111, 237, .25);
+}
+.chips .chip {
+  display: inline-flex; align-items: center; gap: 1px; max-width: 100%;
+  height: 26px; padding: 0 2px 0 10px; border-radius: var(--r-full);
+  background: var(--panel-3); border: 1px solid var(--border);
+  font-family: var(--sans); font-size: var(--fs-sm); line-height: 1;
+  color: var(--text-dim); white-space: nowrap;
+}
+.chips .chip-label {
+  position: relative; align-self: stretch;
+  display: inline-flex; align-items: center;
+  min-width: 0; max-width: 200px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer;
+}
+/* Positioned, because below 900px the hit area is a pseudo element hung off
+   this button rather than a larger circle. */
+.chips .chip-remove {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; flex: none; padding: 0;
+  background: none; border: 0; border-radius: var(--r-full);
+  color: var(--text-mute); cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.chips .chip-remove:hover { background: var(--panel-4); color: var(--text); }
+.chips .chip-remove .ic { width: 12px; height: 12px; }
+/* An address that will not parse is kept and marked rather than dropped. A
+   typed address that silently disappears is a worse failure than one that is
+   visibly wrong, and the send refusal can then name it. --danger-fg and not
+   --danger: the audit already has --danger failing at 4.00:1 as text. */
+.chips .chip.chip-invalid {
+  border-color: var(--danger); background: rgba(224, 72, 60, .10); color: var(--danger-fg);
+}
+.chips .chip.chip-invalid .chip-remove { color: var(--danger-fg); }
+/* Backspace on an empty entry arms the last chip before it removes it, so a
+   held key cannot walk backwards through a recipient list two at a time. */
+.chips .chip.chip-armed { outline: 2px solid var(--primary); outline-offset: 1px; }
+/* The one control in this file that removes its own outline, and it is removed
+   rather than hidden: the ring belongs to the bordered box, not to the bare
+   input inside it, or focusing the entry paints a rectangle inside a rectangle.
+   The indicator is the :focus-within rule above, which is the same 2px of
+   --primary section 8 asks for, drawn one element out. */
+.chips .chip-entry {
+  flex: 1 1 130px; min-width: 130px; width: auto; padding: 0 4px; min-height: 24px;
+  background: none; border: 0; box-shadow: none; outline: none;
+  color: var(--text); font: inherit; font-size: var(--fs-body); line-height: 20px;
+}
+.chips .chip-entry:focus { border: 0; box-shadow: none; background: none; }
+
+/* ---------- compose formatting toolbar ----------
+   The bar wraps and never scrolls. Section 14.3 threw the rail's horizontal
+   scroller out for hiding its own tail, and a toolbar of ten 44px buttons is
+   440px against a 390px screen, which is the same defect one control at a time:
+   the last commands would sit off the right edge with nothing saying so.
+   Wrapping costs a second 44px row on the narrowest phone and hides nothing. */
+.rte-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px; padding: 4px 6px;
+  background: var(--panel-3); border: 1px solid var(--border-strong); border-bottom: 0;
+  border-radius: var(--r-xs) var(--r-xs) 0 0;
+}
+.rte-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  flex: none; min-height: 32px; min-width: 32px; padding: 0 8px;
+  background: none; border: 1px solid transparent; border-radius: var(--r-xs);
+  color: var(--text-dim); font: inherit; font-size: var(--fs-sm); font-weight: 500;
+  white-space: nowrap; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.rte-btn:hover { background: var(--panel-4); color: var(--text); }
+/* .on and aria-pressed are one state under two names. The attribute is what a
+   screen reader reads and the class is what a handler is likely to toggle, and
+   a toolbar where those two can disagree is a toolbar that lies to one of
+   them. */
+.rte-btn.on, .rte-btn[aria-pressed="true"] {
+  background: var(--panel-4); color: var(--text); border-color: var(--border-strong);
+}
+.rte-btn:disabled, .rte-btn[aria-disabled="true"] {
+  color: var(--text-mute); background: none; cursor: not-allowed;
+}
+/* --border-strong and not --border. Shot at 1440 the group divider in a bar
+   grounded on --panel-3 was a 1px line at rgba(255,255,255,.075), which is
+   below the 3:1 an interface edge is held to and read as a gap rather than as
+   a rule. A divider nobody can see is a divider that groups nothing. */
+.rte-sep { flex: none; width: 1px; align-self: stretch; margin: 4px 3px; background: var(--border-strong); }
+
+/* ---------- bulk selection bar ----------
+   It replaces the list header rather than sitting under it, so the count it is
+   acting on cannot scroll away from the buttons that act on it. The blue edge
+   is the same device the console uses for a current nav item and it is the only
+   accent here: a selection is a mode, and a mode has to be visible at a glance
+   without spending a filled button on it. */
+.bulkbar {
+  display: flex; align-items: center; gap: 4px; min-height: 44px;
+  padding: 6px 8px 6px 12px; position: sticky; top: 0; z-index: 30;
+  background: var(--panel-3); border-bottom: 1px solid var(--border);
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+.bulkbar-n {
+  margin-right: auto; font-size: var(--fs-body); font-weight: 600; color: var(--text);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.bulkbar-act {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  flex: none; min-height: 34px; min-width: 34px; padding: 0 8px;
+  background: none; border: 1px solid transparent; border-radius: var(--r-xs);
+  color: var(--text-dim); font: inherit; font-size: var(--fs-sm); cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.bulkbar-act:hover { background: var(--panel-4); color: var(--text); }
+.bulkbar-act.danger { color: var(--danger-fg); }
+.bulkbar-act:disabled, .bulkbar-act[aria-disabled="true"] {
+  color: var(--text-mute); background: none; cursor: not-allowed;
+}
+
+/* ---------- the checkbox column on a message row ----------
+   A real input rather than a styled span, because accent-color already paints
+   it in --primary on both pages, the space bar already toggles it, and a screen
+   reader already announces it as a checkbox with a state. Nothing hand rolled
+   would arrive with all three.
+
+   align-self:start with a 2px nudge, so on the three line phone row the box
+   lines up with the sender rather than floating at the vertical centre of a
+   76px row. */
+/* This has to be a <label> wrapping the input, not a <span> beside it. Below
+   900px the last 16px of the tap target is a transparent pseudo element, and a
+   pseudo element on a span is not a target for anything, while a label's
+   generated box activates the control the label owns. A bare 18px checkbox
+   measured 18x18 at 390px, which is the defect this shape exists to close. */
+.msg-check {
+  position: relative; display: grid; place-items: center;
+  width: 24px; height: 24px; flex: none; align-self: start; margin-top: 2px;
+}
+.msg-check input[type="checkbox"] { width: 18px; height: 18px; margin: 0; cursor: pointer; }
+
+/* ---------- keyboard shortcut sheet ----------
+   Two columns on a desktop, because the list runs to about twenty rows and a
+   single column of twenty rows is a scroll inside a dialog whose whole job is
+   to be read at a glance. */
+.kbd-sheet { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--sp-7); }
+.kbd-group { break-inside: avoid; margin-bottom: var(--sp-4); min-width: 0; }
+.kbd-group-h {
+  font-size: var(--fs-over); line-height: var(--lh-over); font-weight: 700;
+  letter-spacing: .09em; text-transform: uppercase; color: var(--text-mute);
+  padding: var(--sp-3) 0 var(--sp-1);
+}
+.kbd-row {
+  display: flex; align-items: center; gap: var(--sp-3); min-height: 32px; padding: 2px 0;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: var(--fs-body); color: var(--text-dim); min-width: 0;
+}
+.kbd-row:last-child { border-bottom: 0; }
+.kbd-row > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.kbd-keys { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.kbd-then { font-size: var(--fs-cap); color: var(--text-mute); }
+/* An element selector, because a key cap is a <kbd> and giving it a class as
+   well means a cap written without the class arrives as the user agent's idea
+   of monospace on a dark ground. The inset shadow is the only place in this
+   file that draws a physical object, and it is one pixel of it. */
+kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 22px; height: 22px; padding: 0 6px;
+  font-family: var(--mono); font-size: var(--fs-cap); line-height: 1;
+  color: var(--text); background: var(--panel-4);
+  border: 1px solid var(--border-strong); border-radius: var(--r-xs);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, .45);
+}
+
+/* ---------- dropdown menu ----------
+   z-index 160 puts this above the 150 section 15 gives to sheets and modals and
+   below the 200 it gives to toasts. That is an addition to the table rather
+   than a contradiction of it: the first real consumer is the send later menu,
+   which opens from a button inside the compose sheet, and a popover that its
+   own sheet paints over is a popover nobody can use. It stays under toasts
+   because a toast must never be covered and is never interactive. */
+.menu {
+  position: absolute; z-index: 160; min-width: 200px; max-width: min(92vw, 320px);
+  max-height: min(60vh, 360px); overflow-y: auto; overscroll-behavior: contain;
+  padding: 4px; background: var(--panel-3);
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm);
+  box-shadow: var(--e3);
+}
+.menu[hidden] { display: none; }
+.menu-item {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 34px;
+  padding: 5px 9px; background: none; border: 0; border-radius: var(--r-xs);
+  color: var(--text-dim); font: inherit; font-size: var(--fs-body);
+  text-align: left; text-decoration: none; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.menu-item:hover, .menu-item[aria-selected="true"] {
+  background: var(--panel-4); color: var(--text); text-decoration: none;
+}
+.menu-item .ic { color: var(--text-mute); }
+.menu-item:hover .ic, .menu-item[aria-selected="true"] .ic { color: var(--text-dim); }
+/* The trailing half of a row: a resolved time, a count, a key cap. Pushed right
+   rather than laid out as a second column, so a menu holding one note and six
+   plain rows does not reserve a column for the one. */
+.menu-note {
+  margin-left: auto; flex: none; font-size: var(--fs-cap); color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+.menu-item.danger { color: var(--danger-fg); }
+.menu-item:disabled, .menu-item[aria-disabled="true"] {
+  color: var(--text-mute); background: none; cursor: not-allowed;
+}
+.menu-sep { height: 1px; margin: 4px 6px; background: var(--border); border: 0; }
+
+/* ---------- the send later picker ----------
+   Presets first and the custom row last, because the presets answer the
+   question almost every time and a date box opening first makes everybody read
+   a calendar to say "tomorrow morning".
+
+   The two boxes are native date and time inputs. color-scheme:dark is already
+   on :root in both files, and that is what makes the platform paint its own
+   calendar popup and its own spin buttons dark; without it this is the exact
+   control that arrives white on a near black page. */
+.when-pick { min-width: 236px; }
+.when-preset {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 38px;
+  padding: 5px 9px; background: none; border: 0; border-radius: var(--r-xs);
+  color: var(--text-dim); font: inherit; font-size: var(--fs-body);
+  text-align: left; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.when-preset:hover { background: var(--panel-4); color: var(--text); }
+.when-preset .when-at {
+  margin-left: auto; flex: none; font-size: var(--fs-cap); color: var(--text-mute);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.when-custom { display: flex; align-items: center; gap: var(--sp-2); padding: 6px 9px 8px; }
+.when-custom input {
+  flex: 1 1 0; min-width: 0; min-height: 34px; padding: 5px 8px;
+  background: var(--field); border: 1px solid var(--border-strong);
+  border-radius: var(--r-xs); color: var(--text);
+  font: inherit; font-size: var(--fs-sm);
+}
+/* Border and ground only. The ring is the one on :focus-visible at the top of
+   this file, and drawing a second one here as a shadow would put two rings of
+   two different blues around the same box. */
+.when-custom input:focus { border-color: var(--primary); background: var(--field-focus); }
+.when-foot { display: flex; align-items: center; gap: var(--sp-2); padding: 0 9px 8px; }
+.when-foot .spacer { flex: 1 1 auto; }
+
+/* ---------- phase 2 surfaces below 900px ----------
+   Section 8: 44x44, and the hit area grows rather than the glyph. */
+@media (max-width: 899.98px) {
+  /* 44 for the entry box plus 5px of padding either side. The chip is 40 and
+     not 44 so that a wrapped row of chips is not four fifths air, and the last
+     4px of its two buttons are bought back below with a pseudo element. */
+  .chips { min-height: 54px; padding: 5px 6px; }
+  .chips .chip { height: 40px; padding: 0 3px 0 12px; font-size: 13.5px; }
+  /* 40 plus 2 either side is 44. Two is also what fits: wrapped chip rows are
+     6px apart, so a taller spill would put this row's hit area inside the row
+     above it and a tap on the gap would edit the wrong recipient. */
+  .chips .chip-label::after { content: ""; position: absolute; inset: -2px 0; }
+  .chips .chip-remove { width: 30px; height: 30px; }
+  /* 30 plus 7 either side is 44. The inset spills into the 6px gap between
+     chips, which is the gap and not the next chip's own remove button. */
+  .chips .chip-remove::after { content: ""; position: absolute; inset: -7px; }
+  /* An input cannot be given a pseudo element in every engine, so this one is
+     physically 44 rather than 24 wearing a bigger hit box. 16px, or iOS Safari
+     zooms the whole page on focus and never zooms back: the rule that does this
+     elsewhere matches input and textarea by tag inside .field, and this box is
+     neither of those things once it is inside .chips. */
+  .chips .chip-entry { min-height: 44px; font-size: 16px; }
+
+  .rte-btn { min-height: 44px; min-width: 44px; padding: 0 12px; font-size: 13.5px; }
+  .rte-sep { margin: 6px 3px; }
+
+  .bulkbar { min-height: 56px; padding: 8px 8px 8px 12px; }
+  .bulkbar-act { min-height: 44px; min-width: 44px; padding: 0 10px; }
+
+  .msg-check { width: 28px; height: 28px; }
+  .msg-check::after { content: ""; position: absolute; inset: -8px; }
+
+  .kbd-sheet { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .kbd-row { min-height: 44px; }
+  kbd { min-width: 26px; height: 26px; font-size: var(--fs-sm); }
+
+  .menu { min-width: min(92vw, 260px); }
+  .menu-item { min-height: 44px; }
+
+  .when-pick { min-width: 0; }
+  .when-preset { min-height: 48px; }
+  .when-custom input { min-height: 44px; font-size: 16px; }
+}
+
+/* ==========================================================================
    RESPONSIVE SYSTEM
 
    Measured before writing: at 390px, 14 of 17 console views had content running

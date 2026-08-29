@@ -3,6 +3,7 @@ package com.jarurat.mailer.webmail;
 import com.jarurat.mailer.mail.Attachment;
 import com.jarurat.mailer.mail.JmapClient;
 import com.jarurat.mailer.mail.MailService;
+import com.jarurat.mailer.mail.Outgoing;
 import com.jarurat.mailer.messagelog.MessageLogService;
 import com.jarurat.mailer.security.LoginRateLimiter;
 import com.jarurat.mailer.services.AuditService;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpSession;
 import org.springframework.mock.web.MockMultipartFile;
@@ -96,8 +98,7 @@ class MailAttachmentSendTest {
         // The refusal is worth nothing if the bytes went up anyway, and worth less
         // than nothing if the message went out with them on it.
         verify(jmap, never()).upload(anyString(), anyString(), anyLong(), any());
-        verify(mail, never()).send(anyString(), anyList(), anyList(), anyString(),
-                anyString(), anyString(), anyList());
+        verify(mail, never()).send(anyString(), any(Outgoing.class));
     }
 
     /**
@@ -158,8 +159,7 @@ class MailAttachmentSendTest {
         assertThat(answer.getStatusCode().value()).isEqualTo(400);
         assertThat(error(answer)).contains("17.0 MB").contains("23.3 MB");
         verify(jmap, never()).upload(anyString(), anyString(), anyLong(), any());
-        verify(mail, never()).send(anyString(), anyList(), anyList(), anyString(),
-                anyString(), anyString(), anyList());
+        verify(mail, never()).send(anyString(), any(Outgoing.class));
     }
 
     /** The budget is the total, not the largest file. Four files under it can still be over it. */
@@ -202,7 +202,6 @@ class MailAttachmentSendTest {
      */
     @Test
     @DisplayName("the uploaded blob is what the message carries")
-    @SuppressWarnings("unchecked")
     void theBlobReachesTheSend() {
         when(jmap.upload(eq(MAILBOX), anyString(), anyLong(), any()))
                 .thenReturn(new JmapClient.Blob("Gd1a2b", "application/pdf", 4096));
@@ -210,12 +209,10 @@ class MailAttachmentSendTest {
         ResponseEntity<?> answer = send(file("consent form.pdf", "application/pdf", 4096));
         assertThat(answer.getStatusCode().value()).isEqualTo(200);
 
-        org.mockito.ArgumentCaptor<List<Attachment>> captor =
-                org.mockito.ArgumentCaptor.forClass(List.class);
-        verify(mail).send(eq(MAILBOX), anyList(), anyList(), anyString(), anyString(), anyString(),
-                captor.capture());
+        ArgumentCaptor<Outgoing> captor = ArgumentCaptor.forClass(Outgoing.class);
+        verify(mail).send(eq(MAILBOX), captor.capture());
 
-        List<Attachment> carried = captor.getValue();
+        List<Attachment> carried = captor.getValue().attachments();
         assertThat(carried).hasSize(1);
         assertThat(carried.get(0).blobId()).isEqualTo("Gd1a2b");
         assertThat(carried.get(0).safeName()).isEqualTo("consent form.pdf");
@@ -224,19 +221,28 @@ class MailAttachmentSendTest {
     }
 
     /**
-     * The contract every other caller relies on. A send with no parts at all must
-     * still reach the five argument path and answer exactly what it used to.
+     * The contract every other caller relies on. A send that names only a recipient,
+     * a subject and a body has to keep answering exactly what it used to, which is the
+     * whole reason the blind copy, formatted HTML and threading parameters were added
+     * as optional ones rather than folded into the existing four.
      */
     @Test
     @DisplayName("a send with no files is untouched")
     void theOldShapeStillWorks() {
         ResponseEntity<?> answer = controller.send(null, session,
-                "asha@jarurat.care", null, "Hello", "Body text", null);
+                "asha@jarurat.care", null, null, "Hello", "Body text", null, null, null, null);
 
         assertThat(answer.getStatusCode().value()).isEqualTo(200);
         assertThat(body(answer).get("message").toString()).isEqualTo("Sent to asha@jarurat.care.");
-        verify(mail).send(eq(MAILBOX), eq(List.of("asha@jarurat.care")), eq(List.of()),
-                eq("Hello"), anyString(), eq("Body text"), eq(List.of()));
+
+        ArgumentCaptor<Outgoing> message = ArgumentCaptor.forClass(Outgoing.class);
+        verify(mail).send(eq(MAILBOX), message.capture());
+        assertThat(message.getValue().to()).containsExactly("asha@jarurat.care");
+        assertThat(message.getValue().cc()).isEmpty();
+        assertThat(message.getValue().bcc()).isEmpty();
+        assertThat(message.getValue().subject()).isEqualTo("Hello");
+        assertThat(message.getValue().text()).isEqualTo("Body text");
+        assertThat(message.getValue().html()).isEqualTo("<p>Body text</p>");
         verify(jmap, never()).upload(anyString(), anyString(), anyLong(), any());
     }
 
@@ -254,7 +260,8 @@ class MailAttachmentSendTest {
     // ------------------------------------------------------------------ helpers
 
     private ResponseEntity<?> send(MultipartFile... files) {
-        return controller.send(null, session, "asha@jarurat.care", null, "Subject", "Body", files);
+        return controller.send(null, session, "asha@jarurat.care", null, null,
+                "Subject", "Body", null, null, null, files);
     }
 
     /**

@@ -45,7 +45,7 @@ public class MailService {
             "subject", "from", "to", "cc", "preview", "hasAttachment");
 
     private static final List<String> BODY_PROPS = List.of(
-            "id", "threadId", "mailboxIds", "keywords", "subject", "from", "to", "cc", "replyTo",
+            "id", "threadId", "mailboxIds", "keywords", "subject", "from", "to", "cc", "bcc", "replyTo",
             "sentAt", "receivedAt", "textBody", "htmlBody", "bodyValues", "attachments",
             "messageId", "inReplyTo", "references");
 
@@ -66,6 +66,16 @@ public class MailService {
                 return i < 0 ? ROLE_ORDER.size() : i;
             })
             .thenComparing((MailFolder f) -> f.name() == null ? "" : f.name(), String.CASE_INSENSITIVE_ORDER);
+
+    /** How long a mailbox id or a send identity is trusted without asking again. */
+    private static final long CACHE_SECONDS = 300;
+
+    private record Cached<T>(T value, Instant expiresAt) {
+        boolean isStale() { return Instant.now().isAfter(expiresAt); }
+    }
+
+    private final Map<String, Cached<Map<String, String>>> roleCache = new ConcurrentHashMap<>();
+    private final Map<String, Identity> identityCache = new ConcurrentHashMap<>();
 
     private final JmapClient client;
     private final SesSender ses;
@@ -238,7 +248,7 @@ public class MailService {
                 JmapClient.text(e, "threadId"),
                 JmapClient.text(e, "subject"),
                 addresses(e.path("from")), addresses(e.path("to")),
-                addresses(e.path("cc")), addresses(e.path("replyTo")),
+                addresses(e.path("cc")), addresses(e.path("bcc")), addresses(e.path("replyTo")),
                 instant(e, "sentAt"), instant(e, "receivedAt"),
                 bodyOfType(e.path("htmlBody"), values, "text/html"),
                 bodyOfType(e.path("textBody"), values, "text/plain"),
@@ -371,7 +381,7 @@ public class MailService {
      */
     public String send(String user, List<String> to, List<String> cc, String subject,
                        String htmlBody, String textBody) {
-        return send(user, to, cc, subject, htmlBody, textBody, List.of());
+        return send(user, Outgoing.message(to, cc, subject, htmlBody, textBody));
     }
 
     /**
@@ -387,57 +397,221 @@ public class MailService {
      */
     public String send(String user, List<String> to, List<String> cc, String subject,
                        String htmlBody, String textBody, List<Attachment> attachments) {
-        List<String> recipients = cleanAddresses(to);
-        List<String> copies = cleanAddresses(cc);
-        if (recipients.isEmpty() && copies.isEmpty()) {
+        return send(user, Outgoing.message(to, cc, subject, htmlBody, textBody)
+                .withAttachments(attachments));
+    }
+
+    /**
+     * The whole of the send contract, blind copies and threading headers included.
+     *
+     * The blind copy guarantee lives in this method and is structural rather than
+     * procedural, which is the only kind worth making. The Email object built below
+     * has a to and it has a cc and there is no line anywhere in this class that puts
+     * a bcc property on it, so there is no Bcc header for Stalwart to render into the
+     * MIME and therefore nothing for any recipient's client to display. The blind
+     * addresses appear once, in envelope.rcptTo on the EmailSubmission, which is the
+     * SMTP conversation and is never part of the message any recipient receives. That
+     * also means the copy filed in Sent carries no record of who was blind copied,
+     * which is a real cost and is why every blind address is written to the audit log
+     * and the message log instead, where it belongs and where nobody outside the
+     * organisation can read it.
+     */
+    public String send(String user, Outgoing message) {
+        List<String> envelope = cleanAddresses(message.everyRecipient());
+        if (envelope.isEmpty()) {
             throw new MailException(MailException.Kind.PROTOCOL, "A message needs at least one recipient");
+        }
+        if (envelope.size() > Outgoing.MAX_RECIPIENTS) {
+            throw new MailException(MailException.Kind.PROTOCOL,
+                    "That message names " + envelope.size() + " recipients and one message may carry "
+                            + Outgoing.MAX_RECIPIENTS + ". Send a list this size from Campaign Studio, "
+                            + "which throttles it and records what happened to each address.");
         }
 
         Identity identity = defaultIdentity(user);
-        Map<String, MailFolder> roles = rolesOf(user);
-        MailFolder drafts = roles.get("drafts");
-        MailFolder sent = roles.get("sent");
+        Map<String, String> roles = roleFolderIds(user);
+        String drafts = roles.get("drafts");
+        String sent = roles.get("sent");
         if (drafts == null) {
             throw new MailException(MailException.Kind.NOT_FOUND, "No Drafts folder in " + user + "'s mailbox");
         }
 
-        boolean hasHtml = htmlBody != null && !htmlBody.isBlank();
-        // Never send HTML alone. A text alternative is what non-HTML clients and
-        // most spam filters read, and it costs nothing to derive one.
-        String text = textBody != null && !textBody.isBlank()
-                ? textBody
-                : (hasHtml ? ses.toPlainText(htmlBody) : "");
+        ObjectNode draft = buildEmail(identity, drafts, message, false);
+
+        ObjectNode create = client.accountArgs(user);
+        create.putObject("create").set("draft", draft);
+
+        ObjectNode submit = client.accountArgs(user);
+        ObjectNode submission = submit.putObject("create").putObject("sub");
+        submission.put("emailId", "#draft");
+        submission.put("identityId", identity.id());
+        ObjectNode envelopeNode = submission.putObject("envelope");
+        envelopeNode.putObject("mailFrom").put("email", identity.email());
+        ArrayNode rcpt = envelopeNode.putArray("rcptTo");
+        // The one place a blind address is named, and it is the SMTP envelope rather
+        // than the message. RFC 8621 lets the envelope be omitted and derived from the
+        // header addresses, and this is exactly why it must not be: a derived envelope
+        // can only reach the people the headers name, so a blind copy would silently
+        // never be delivered at all.
+        for (String address : envelope) rcpt.addObject().put("email", address);
+
+        if (sent != null) {
+            ObjectNode onSuccess = submit.putObject("onSuccessUpdateEmail").putObject("#sub");
+            onSuccess.putNull("mailboxIds/" + drafts);
+            onSuccess.put("mailboxIds/" + sent, true);
+            onSuccess.putNull("keywords/$draft");
+        }
+
+        JsonNode responses = client.call(user, SEND_CAPS, client.newArray()
+                .add(client.invocation("Email/set", create, "c0"))
+                .add(client.invocation("EmailSubmission/set", submit, "s0")));
+
+        JsonNode created = client.response(responses, "Email/set", "c0");
+        JsonNode refusedDraft = created.path("notCreated").path("draft");
+        if (!refusedDraft.isMissingNode() && !refusedDraft.isNull()) {
+            throw new MailException(MailException.Kind.METHOD, JmapClient.text(refusedDraft, "type"),
+                    "Mail server refused the message: " + JmapClient.text(refusedDraft, "type"), null);
+        }
+
+        JsonNode submitted = client.response(responses, "EmailSubmission/set", "s0");
+        JsonNode refusedSend = submitted.path("notCreated").path("sub");
+        if (!refusedSend.isMissingNode() && !refusedSend.isNull()) {
+            throw new MailException(MailException.Kind.METHOD, JmapClient.text(refusedSend, "type"),
+                    "Mail server accepted the message but refused to send it: "
+                            + JmapClient.text(refusedSend, "type"), null);
+        }
+
+        return JmapClient.text(created.path("created").path("draft"), "id");
+    }
+
+    // ------------------------------------------------------------------
+    // Drafts
+    // ------------------------------------------------------------------
+
+    /**
+     * Writes a draft into the Drafts mailbox and returns the id it now has.
+     *
+     * There is no Postgres table behind this and there must never be one. A draft is
+     * mailbox state: the whole reason to save one is that it is on the laptop when it
+     * was written on a phone, and the moment a second copy lives in our database the
+     * two disagree the first time somebody opens the same account in Thunderbird.
+     *
+     * Passing an existing draftId replaces that draft, and the replacement is a create
+     * followed by a destroy rather than an update because RFC 8621 makes an Email
+     * immutable apart from mailboxIds and keywords. There is no way to change the body
+     * of a message that exists, so the JMAP shape of "edit a draft" is genuinely a new
+     * message and the deletion of the old one. Both go in one Email/set, where the
+     * specified processing order is create before destroy, so the new draft is safely
+     * on the server before the old one stops existing and a failure halfway leaves the
+     * sender with a duplicate rather than with nothing.
+     */
+    public String saveDraft(String user, String draftId, Outgoing message) {
+        Identity identity = defaultIdentity(user);
+        String drafts = roleFolderIds(user).get("drafts");
+        if (drafts == null) {
+            throw new MailException(MailException.Kind.NOT_FOUND, "No Drafts folder in " + user + "'s mailbox");
+        }
+
+        ObjectNode args = client.accountArgs(user);
+        args.putObject("create").set("draft", buildEmail(identity, drafts, message, true));
+        if (draftId != null && !draftId.isBlank()) args.putArray("destroy").add(draftId);
+
+        JsonNode result = client.response(
+                client.call(user, MAIL_CAPS, client.newArray().add(client.invocation("Email/set", args, "v0"))),
+                "Email/set", "v0");
+
+        JsonNode refused = result.path("notCreated").path("draft");
+        if (!refused.isMissingNode() && !refused.isNull()) {
+            throw new MailException(MailException.Kind.METHOD, JmapClient.text(refused, "type"),
+                    "Mail server refused the draft: " + JmapClient.text(refused, "type"), null);
+        }
+        // A refusal to destroy the previous version is deliberately not fatal. The only
+        // way it happens is that the id is already gone, which is the state we wanted,
+        // and failing the save would lose the text the sender has just typed over a
+        // message that says the old copy could not be deleted.
+        return JmapClient.text(result.path("created").path("draft"), "id");
+    }
+
+    /** Throws the draft away. Used when a draft is sent, and when the sender discards one. */
+    public void deleteDraft(String user, String draftId) {
+        if (draftId == null || draftId.isBlank()) return;
+        purge(user, draftId);
+    }
+
+    // ------------------------------------------------------------------
+    // Building the Email object
+    // ------------------------------------------------------------------
+
+    /**
+     * The Email object a send and a draft save both produce, so the two cannot drift.
+     *
+     * asDraft is the only thing that decides whether a Bcc header is written, and the
+     * distinction is the whole of the blind copy guarantee. A draft is a file in the
+     * sender's own mailbox that is never transmitted to anybody, so a Bcc header on one
+     * is private notepaper and is the only way a draft written on a phone still knows
+     * who it was going to blind copy when it is opened on a laptop. A send is a
+     * transmission, so the header is not written at all: the blind addresses reach the
+     * SMTP envelope in send() and nowhere else, which means there is no Bcc header for
+     * the mail server to render into the MIME and therefore nothing any recipient's
+     * client could display even if it wanted to. The send path is asserted by a test
+     * that walks this JSON looking for the string bcc and fails if it finds it.
+     */
+    private ObjectNode buildEmail(Identity identity, String mailboxId, Outgoing message, boolean asDraft) {
+        List<String> recipients = cleanAddresses(message.to());
+        List<String> copies = cleanAddresses(message.cc());
 
         ObjectNode draft = client.newObject();
-        draft.putObject("mailboxIds").put(drafts.id(), true);
+        draft.putObject("mailboxIds").put(mailboxId, true);
         ObjectNode keywords = draft.putObject("keywords");
         keywords.put("$draft", true);
         keywords.put("$seen", true);
         draft.putArray("from").addObject()
                 .put("name", identity.name() == null ? "" : identity.name())
                 .put("email", identity.email());
-        addressArray(draft.putArray("to"), recipients);
+        // An empty array is not the same as an absent header, and a To with no
+        // addresses in it is what a blind copy only message would otherwise carry.
+        if (!recipients.isEmpty()) addressArray(draft.putArray("to"), recipients);
         if (!copies.isEmpty()) addressArray(draft.putArray("cc"), copies);
+        if (asDraft) {
+            List<String> blind = cleanAddresses(message.bcc());
+            if (!blind.isEmpty()) addressArray(draft.putArray("bcc"), blind);
+        }
         if (identity.replyTo() != null && !identity.replyTo().isBlank()) {
             addressArray(draft.putArray("replyTo"), List.of(identity.replyTo()));
         }
-        draft.put("subject", subject == null ? "" : subject);
+        draft.put("subject", message.subject());
+
+        // In-Reply-To and References are what actually make a conversation, and the
+        // subject line is not: a recipient's client groups on a message id shared
+        // between these two headers, so a reply that omits them opens a new thread on
+        // the recipient's screen no matter how many times "Re:" is prefixed. References
+        // carries the parent's own chain plus the parent, which is what lets a client
+        // rebuild the middle of a conversation it was only copied into halfway.
+        if (message.isThreaded()) {
+            draft.putArray("inReplyTo").add(message.inReplyTo());
+            ArrayNode refs = draft.putArray("references");
+            for (String id : threadReferences(message)) refs.add(id);
+        }
 
         ObjectNode values = client.newObject();
         ObjectNode body = client.newObject();
+        String html = OutboundHtml.clean(message.html());
+        boolean hasHtml = !html.isBlank();
+        String text = textPartFor(message, html, hasHtml);
+
         if (hasHtml) {
             body.put("type", "multipart/alternative");
             ArrayNode parts = body.putArray("subParts");
             parts.addObject().put("partId", "t").put("type", "text/plain");
             parts.addObject().put("partId", "h").put("type", "text/html");
             values.putObject("t").put("value", text);
-            values.putObject("h").put("value", htmlBody);
+            values.putObject("h").put("value", html);
         } else {
             body.put("partId", "t").put("type", "text/plain");
             values.putObject("t").put("value", text);
         }
 
-        List<Attachment> files = attachments == null ? List.of() : attachments;
+        List<Attachment> files = message.attachments();
         if (files.isEmpty()) {
             draft.set("bodyStructure", body);
         } else {
@@ -472,69 +646,112 @@ public class MailService {
             }
         }
         draft.set("bodyValues", values);
+        return draft;
+    }
 
-        ObjectNode create = client.accountArgs(user);
-        create.putObject("create").set("draft", draft);
+    /**
+     * How long a References chain is allowed to get before it is trimmed.
+     *
+     * RFC 5322 says a client may drop entries from a long chain and names the rule:
+     * keep the first, because that is what identifies the conversation, and drop from
+     * the second onward. Twenty is generous for a mail thread and keeps the header
+     * well under the point where a receiving server starts folding or refusing it.
+     */
+    private static final int MAX_REFERENCES = 20;
 
-        ObjectNode submit = client.accountArgs(user);
-        ObjectNode submission = submit.putObject("create").putObject("sub");
-        submission.put("emailId", "#draft");
-        submission.put("identityId", identity.id());
-        ObjectNode envelope = submission.putObject("envelope");
-        envelope.putObject("mailFrom").put("email", identity.email());
-        ArrayNode rcpt = envelope.putArray("rcptTo");
-        for (String address : recipients) rcpt.addObject().put("email", address);
-        for (String address : copies) rcpt.addObject().put("email", address);
+    private static List<String> threadReferences(Outgoing message) {
+        List<String> parent = message.references();
+        List<String> chain = new ArrayList<>(parent.size() + 1);
+        chain.addAll(parent);
+        if (!chain.contains(message.inReplyTo())) chain.add(message.inReplyTo());
+        if (chain.size() <= MAX_REFERENCES) return chain;
+        List<String> trimmed = new ArrayList<>(MAX_REFERENCES);
+        trimmed.add(chain.get(0));
+        trimmed.addAll(chain.subList(chain.size() - (MAX_REFERENCES - 1), chain.size()));
+        return trimmed;
+    }
 
-        if (sent != null) {
-            ObjectNode onSuccess = submit.putObject("onSuccessUpdateEmail").putObject("#sub");
-            onSuccess.putNull("mailboxIds/" + drafts.id());
-            onSuccess.put("mailboxIds/" + sent.id(), true);
-            onSuccess.putNull("keywords/$draft");
-        }
-
-        JsonNode responses = client.call(user, SEND_CAPS, client.newArray()
-                .add(client.invocation("Email/set", create, "c0"))
-                .add(client.invocation("EmailSubmission/set", submit, "s0")));
-
-        JsonNode created = client.response(responses, "Email/set", "c0");
-        JsonNode refusedDraft = created.path("notCreated").path("draft");
-        if (!refusedDraft.isMissingNode() && !refusedDraft.isNull()) {
-            throw new MailException(MailException.Kind.METHOD, JmapClient.text(refusedDraft, "type"),
-                    "Mail server refused the message: " + JmapClient.text(refusedDraft, "type"), null);
-        }
-
-        JsonNode submitted = client.response(responses, "EmailSubmission/set", "s0");
-        JsonNode refusedSend = submitted.path("notCreated").path("sub");
-        if (!refusedSend.isMissingNode() && !refusedSend.isNull()) {
-            throw new MailException(MailException.Kind.METHOD, JmapClient.text(refusedSend, "type"),
-                    "Mail server accepted the message but refused to send it: "
-                            + JmapClient.text(refusedSend, "type"), null);
-        }
-
-        return JmapClient.text(created.path("created").path("draft"), "id");
+    /**
+     * The text alternative, supplied or derived, and never absent when there is HTML.
+     *
+     * A message carrying an HTML part and no plain part is one of the oldest signals a
+     * spam filter has, because a filter cannot read what it cannot parse and a sender
+     * who omits the readable half is usually hiding something in the other one. We
+     * have SES production access and a domain reputation, so an avoidable spam signal
+     * on every outgoing mail is a business cost and not a stylistic one. The derived
+     * part comes from walking the sanitised HTML, and the SesSender fallback is only
+     * reached when that walk produces nothing at all, which is the case of a body that
+     * is one image and no words.
+     */
+    private String textPartFor(Outgoing message, String html, boolean hasHtml) {
+        String supplied = message.text();
+        if (supplied != null && !supplied.isBlank()) return supplied;
+        if (!hasHtml) return "";
+        String derived = OutboundHtml.toText(html);
+        return derived.isBlank() ? ses.toPlainText(html) : derived;
     }
 
     private Identity defaultIdentity(String user) {
+        Identity cached = identityCache.get(user);
+        if (cached != null) return cached;
+
         List<Identity> identities = listIdentities(user);
         if (identities.isEmpty()) {
             throw new MailException(MailException.Kind.NOT_FOUND,
                     "Stalwart lists no send identity for " + user);
         }
+        Identity chosen = identities.get(0);
         for (Identity i : identities) {
-            if (i.email() != null && i.email().equalsIgnoreCase(user)) return i;
-        }
-        return identities.get(0);
-    }
-
-    private Map<String, MailFolder> rolesOf(String user) {
-        Map<String, MailFolder> byRole = new LinkedHashMap<>();
-        for (MailFolder f : listFolders(user)) {
-            if (f.role() != null && !f.role().isBlank()) {
-                byRole.put(f.role().toLowerCase(Locale.ROOT), f);
+            if (i.email() != null && i.email().equalsIgnoreCase(user)) {
+                chosen = i;
+                break;
             }
         }
-        return byRole;
+        identityCache.put(user, chosen);
+        return chosen;
+    }
+
+    /**
+     * The folder id behind each role, remembered for a few minutes.
+     *
+     * Sending used to cost three round trips before a single byte moved: one for the
+     * identity list, one for the folder list, and one for the message itself. Two of
+     * those three ask for things that do not change. A mailbox id in JMAP is stable
+     * for the life of the mailbox and a send identity changes when an administrator
+     * adds one, so re-reading both on every keystroke of a draft autosave is paying a
+     * network round trip for an answer we already had. Only the id is cached and never
+     * the message counts, because the counts are the part that goes stale in seconds.
+     *
+     * The staleness window is deliberately short rather than absent: an operator who
+     * adds an identity or a folder in Stalwart's admin should see it take effect
+     * without anybody restarting this application, and a few minutes is the longest
+     * anyone would tolerate wondering whether it worked.
+     */
+    private Map<String, String> roleFolderIds(String user) {
+        Cached<Map<String, String>> hit = roleCache.get(user);
+        if (hit != null && !hit.isStale()) return hit.value();
+
+        Map<String, String> byRole = new LinkedHashMap<>();
+        for (MailFolder f : listFolders(user)) {
+            if (f.role() != null && !f.role().isBlank() && f.id() != null) {
+                byRole.put(f.role().toLowerCase(Locale.ROOT), f.id());
+            }
+        }
+        Map<String, String> frozen = Map.copyOf(byRole);
+        roleCache.put(user, new Cached<>(frozen, Instant.now().plusSeconds(CACHE_SECONDS)));
+        return frozen;
+    }
+
+    /**
+     * Drops what this service remembers about one mailbox.
+     *
+     * Locking a mailbox should reach this, so that the next person to open the same
+     * address on the same machine starts from what the mail server says rather than
+     * from what the previous session was told.
+     */
+    public void forgetCaches(String user) {
+        roleCache.remove(user);
+        identityCache.remove(user);
     }
 
     // ------------------------------------------------------------------

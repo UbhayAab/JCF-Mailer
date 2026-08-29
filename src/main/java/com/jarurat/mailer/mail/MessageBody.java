@@ -9,10 +9,15 @@ import java.util.List;
  * came from a mail client: Stalwart returns the same plain part under both
  * textBody and htmlBody when a message has no HTML alternative, and this record
  * has already resolved that (html is null unless a real text/html part existed).
+ *
+ * bcc is populated only for a draft. A message that arrived carries no Bcc header by
+ * definition, because the whole point of a blind copy is that nobody who receives the
+ * message can see it, and our own send path never writes one either. It is here so a
+ * draft resumed on a second device still knows who it was going to blind copy.
  */
 public record MessageBody(String id, String threadId, String subject,
                           List<MailAddress> from, List<MailAddress> to,
-                          List<MailAddress> cc, List<MailAddress> replyTo,
+                          List<MailAddress> cc, List<MailAddress> bcc, List<MailAddress> replyTo,
                           Instant sentAt, Instant receivedAt,
                           String html, String text,
                           List<Attachment> attachments, List<String> folderIds,
