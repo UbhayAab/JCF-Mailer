@@ -175,12 +175,32 @@ public final class MailHtmlSanitizer {
      * wrap it in a standalone document ready to hand to an iframe's srcdoc property.
      */
     public static Result toReaderDocument(String html, String text, boolean allowRemoteImages, String theme) {
-        // "original" is the escape hatch: render the message exactly as the sender
-        // built it, on white, with no colour re-tuning at all. Everything else reads on
-        // the dark shell, because a white slab inside a dark application is jarring and
-        // the lifting below is what makes that safe. See liftForDarkGround.
-        boolean showOriginal = "original".equalsIgnoreCase(theme) || "light".equalsIgnoreCase(theme);
-        boolean dark = !showOriginal;
+        // A MESSAGE SOMEBODY ELSE WROTE IS RENDERED AS THEY WROTE IT, ON PAPER.
+        //
+        // This class spent two rounds trying to re-tune sender colours so a letter could
+        // sit on the dark shell, and the attempt failed on real mail in a way worth
+        // recording, because it looks reasonable on paper and is wrong in practice.
+        //
+        // Re-tuning means guessing what a colour was FOR. Every guess is per-declaration
+        // and has no idea what the message looks like as a whole, so a signature written
+        // in Word's standard purple, #7030A0, came out as #9759c6, a bright magenta;
+        // a dark red #C00000 became a washed pink; and a grey chosen as body text was
+        // sometimes snapped to the reader's colour and sometimes left alone depending on
+        // where it happened to fall against a contrast threshold. Each message therefore
+        // looked different from the last and several looked broken. Measured on real
+        // mail, not imagined.
+        //
+        // Senders design against white. On white, every one of those colours is correct
+        // by construction, contrast included, with no guessing at all. So the letter is
+        // rendered on light and the DARKNESS MOVES TO THE FRAME AROUND IT: the reader
+        // presents it as an inset card, the way Apple Mail and Outlook do, so it reads
+        // as a letter inside a dark application rather than as a white screen. That was
+        // the real objection to the first attempt, and it is a layout problem, which is
+        // where it is now solved.
+        //
+        // "dark" remains available for anybody who explicitly asks for the re-tuned
+        // rendering, and the machinery is kept for it, but it is no longer the default.
+        boolean dark = "dark".equalsIgnoreCase(theme);
 
         Result body;
         if (html != null && !html.isBlank()) {

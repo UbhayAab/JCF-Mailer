@@ -107,6 +107,10 @@ const S = {
   folderName: 'Inbox',
   folderRole: '',
   messages: [],
+  /* How the message body is rendered, which is a different question from the app's
+     own theme. Light by default, because a letter is shown as its sender built it;
+     "dark" is the per-message opt in to the re-tuned rendering. */
+  readerTheme: 'light',
   total: 0,
   offset: 0,
   limit: 40,
@@ -1003,6 +1007,83 @@ $('reader').addEventListener('click', function (e) {
  * a star, a move or a delete rather than two, and stops a desktop close from
  * walking the browser off the page.
  */
+/* ---------- swiping between messages ----------
+ *
+ * A horizontal swipe in the reader moves to the next or previous message in the list
+ * you opened it from, which is what every mail app on a phone does and the reason the
+ * back-and-tap-again dance feels slow.
+ *
+ * Three things make this behave rather than fight the page. The gesture is only
+ * claimed once it is clearly horizontal, so an ordinary vertical scroll through a long
+ * letter is never stolen. It is ignored entirely while a finger starts inside the
+ * message frame, because that frame is a separate document doing its own scrolling and
+ * a swipe there usually means "select this text". And it is ignored on a laptop, where
+ * a trackpad's horizontal inertia would otherwise fire it by accident.
+ */
+function neighbourOf(id, step) {
+  const at = S.messages.findIndex(m => m.id === id);
+  if (at < 0) return null;
+  const next = at + step;
+  return next >= 0 && next < S.messages.length ? S.messages[next] : null;
+}
+
+function swipeToNeighbour(step) {
+  if (!S.reader) return;
+  const target = neighbourOf(S.reader.id, step);
+  if (!target) {
+    // Saying nothing looks like a dropped gesture. This is the end of the list, and
+    // the person is owed that fact rather than being left wondering.
+    toast(step > 0 ? 'No older message in this folder' : 'This is the newest message');
+    return;
+  }
+  // Replaces rather than pushes, so ten swipes do not become ten Back presses to get
+  // out of the reader. Back still means "return to the list", which is what it meant
+  // before anybody swiped.
+  openMessage(target.id, { push: false });
+}
+
+(function wireSwipe() {
+  const pane = $('reader');
+  if (!pane || !window.matchMedia || !window.matchMedia('(pointer: coarse)').matches) return;
+
+  let x0 = 0, y0 = 0, tracking = false, decided = false, horizontal = false;
+  const SLOP = 12;          // below this the direction is not yet knowable
+  const TRIGGER = 60;       // far enough to be a swipe and not a stray thumb
+  const MAX_OFF_AXIS = 0.6; // a swipe drifts; a scroll does not stay this flat
+
+  pane.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { tracking = false; return; }
+    // A finger that starts on the letter itself belongs to the letter.
+    if (e.target.closest && e.target.closest('.rframe, .rbar, .att, a, button')) {
+      tracking = false;
+      return;
+    }
+    x0 = e.touches[0].clientX;
+    y0 = e.touches[0].clientY;
+    tracking = true; decided = false; horizontal = false;
+  }, { passive: true });
+
+  pane.addEventListener('touchmove', (e) => {
+    if (!tracking || e.touches.length !== 1) return;
+    const dx = e.touches[0].clientX - x0;
+    const dy = e.touches[0].clientY - y0;
+    if (!decided && (Math.abs(dx) > SLOP || Math.abs(dy) > SLOP)) {
+      decided = true;
+      horizontal = Math.abs(dx) > Math.abs(dy) && Math.abs(dy) / Math.abs(dx) < MAX_OFF_AXIS;
+    }
+  }, { passive: true });
+
+  pane.addEventListener('touchend', (e) => {
+    if (!tracking || !decided || !horizontal) { tracking = false; return; }
+    const dx = (e.changedTouches[0] || {}).clientX - x0;
+    tracking = false;
+    if (Math.abs(dx) < TRIGGER) return;
+    // Left means forward, the direction the list runs, which is newest at the top and
+    // therefore older as you go on.
+    swipeToNeighbour(dx < 0 ? 1 : -1);
+  }, { passive: true });
+})();
+
 function leaveReader() {
   S.reader = null;
   S.readerFor = null;
@@ -1011,10 +1092,20 @@ function leaveReader() {
   else replace({ pane: 'list', id: null, pushed: false });
 }
 
+/**
+ * How the message body should be rendered, which is NOT the app's own theme.
+ *
+ * The shell is dark and stays dark. A letter somebody else wrote is a different
+ * question: they designed it against white, so it is rendered on white and the reader
+ * frames it as an inset card. Sending the app's theme here is what made every message
+ * go through colour re-tuning, and that produced magenta signatures and pink
+ * university names on real mail. See MailHtmlSanitizer.toReaderDocument.
+ *
+ * "dark" is still honoured by the server for anybody who asks for the re-tuned
+ * rendering per message; it is simply no longer what this function returns by default.
+ */
 function theme() {
-  const explicit = document.documentElement.getAttribute('data-theme');
-  if (explicit) return explicit;
-  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  return S.readerTheme === 'dark' ? 'dark' : 'light';
 }
 
 /* ---------- actions ---------- */

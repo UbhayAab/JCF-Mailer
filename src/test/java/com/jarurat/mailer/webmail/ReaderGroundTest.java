@@ -48,13 +48,21 @@ class ReaderGroundTest {
         assertThat(doc).doesNotContain("#333333");
     }
 
-    /** The same must hold for "auto", which follows the reader's operating system. */
+    /**
+     * A letter is shown as its sender built it whatever the app asks for, and "auto",
+     * which follows the reader's operating system, is no exception. Re-tuning their
+     * colours for a dark ground was tried and failed on real mail: a signature in
+     * Word's purple came out magenta and a dark red came out pink. The darkness now
+     * belongs to the frame around the letter rather than to the letter.
+     */
     @Test
-    void senderHtmlIgnoresAutoThemeToo() {
+    void senderHtmlIsPaperWhateverTheAppAsksFor() {
         String doc = MailHtmlSanitizer
                 .toReaderDocument(NEWSLETTER, null, false, "auto").html();
 
-        assertThat(doc).contains("body{background:#202020");
+        assertThat(doc).contains("body{background:#ffffff");
+        // The colours the sender chose survive untouched, which is the whole point.
+        assertThat(doc).contains("#333333");
         // No prefers-color-scheme anywhere, ours or the sender's. color-scheme pins what
         // the frame may render but does NOT stop it answering the media query, so a
         // sender's dark-mode block still fired against our forced white ground and
