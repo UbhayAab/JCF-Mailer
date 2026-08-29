@@ -459,19 +459,14 @@
            frame keeps whatever height it wants. */
         .rwrap{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;
                -webkit-overflow-scrolling:touch}
-        /* The letter, presented as paper on a desk.
-           The message is rendered light because that is what its sender designed
-           against, and every attempt to re-tune their colours for a dark ground failed
-           on real mail: a signature in Word's purple came out magenta, a dark red came
-           out pink, and greys were snapped or kept depending on where they fell against
-           a threshold, so no two messages looked alike. The darkness belongs to the app
-           around the letter, not to the letter. Inset, rounded and shadowed so it reads
-           as a sheet inside a dark application rather than as a white screen, which was
-           the real objection to rendering it light in the first place. */
+        /* The letter is dark, like everything else.
+           Rendering it light was tried and rejected: correct by construction, and not
+           what this product is. The sanitiser now drops every ground the sender painted
+           and forces their text to the reader's own colour, so the frame simply carries
+           on the panel it sits in and there is no seam to hide. Images are left alone
+           there, so a logo still looks like itself. */
         .rframe{display:block;border:0;width:100%;height:100%;min-height:320px;
-                background:#fff;border-radius:10px;
-                box-shadow:0 1px 2px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.35)}
-        .rwrap{padding:0 12px 12px}
+                background:var(--panel)}
         /* Set the moment the frame reports its own height. From then on the frame is
            as tall as the letter, so the wrapper has nothing of its own left to scroll
            and the pane is down to one scroller. Two of them is what made a long

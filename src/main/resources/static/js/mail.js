@@ -110,7 +110,7 @@ const S = {
   /* How the message body is rendered, which is a different question from the app's
      own theme. Light by default, because a letter is shown as its sender built it;
      "dark" is the per-message opt in to the re-tuned rendering. */
-  readerTheme: 'light',
+  readerTheme: 'dark',
   total: 0,
   offset: 0,
   limit: 40,
@@ -1105,7 +1105,7 @@ function leaveReader() {
  * rendering per message; it is simply no longer what this function returns by default.
  */
 function theme() {
-  return S.readerTheme === 'dark' ? 'dark' : 'light';
+  return S.readerTheme === 'light' ? 'light' : 'dark';
 }
 
 /* ---------- actions ---------- */

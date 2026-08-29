@@ -200,7 +200,7 @@ public final class MailHtmlSanitizer {
         //
         // "dark" remains available for anybody who explicitly asks for the re-tuned
         // rendering, and the machinery is kept for it, but it is no longer the default.
-        boolean dark = "dark".equalsIgnoreCase(theme);
+        boolean dark = !"light".equalsIgnoreCase(theme) && !"original".equalsIgnoreCase(theme);
 
         Result body;
         if (html != null && !html.isBlank()) {
@@ -313,8 +313,14 @@ public final class MailHtmlSanitizer {
             // So the ground is inherited the way it actually is on screen. While the
             // walk is inside anything that painted itself light, nothing below it is
             // lifted, because down there the sender's dark text is correct.
-            boolean paintsLight = darkGround && paintsLightGround(tag.attrs);
-            boolean liftHere = darkGround && lightDepth == 0;
+            // The light-ground inheritance that used to live here is gone with the
+            // approach it served. It existed to stop a child being re-tuned when it sat
+            // on a ground its parent had painted, which mattered while sender grounds
+            // were preserved. Nothing is preserved now: every background is dropped, so
+            // nothing can be sitting on a light ground, and keeping the suppression
+            // meant a white table cell survived intact along with the black text in it.
+            boolean paintsLight = false;
+            boolean liftHere = darkGround;
 
             out.append('<').append(name);
             writeAttributes(name, tag.attrs, allowRemoteImages, out, blocked, liftHere);
@@ -330,7 +336,10 @@ public final class MailHtmlSanitizer {
         }
 
         while (!open.isEmpty()) out.append("</").append(open.pop()).append('>');
-        return new Result(out.toString(), blocked[0]);
+        // After the walk rather than during it, because deciding that a quoted thread
+        // has begun needs text the tokeniser has not reached yet at the moment the
+        // element opens.
+        return new Result(markQuotedHeaders(out.toString()), blocked[0]);
     }
 
     /** Plain text bodies still need escaping, and still deserve clickable links. */
@@ -522,9 +531,11 @@ public final class MailHtmlSanitizer {
             // half a message reads and the other half does not. An element carrying its
             // own bgcolor has chosen a pairing and is left alone, exactly as in
             // sanitizeDeclarations.
-            if (darkGround && "color".equals(key) && !attrs.containsKey("bgcolor")) {
-                raw = liftForDarkGround("color:" + raw).substring("color:".length());
-            }
+            // font color and bgcolor predate CSS and a great many newsletters still use
+            // them, so the forced ground has to reach them too or half a message follows
+            // the rule and the other half does not.
+            if (darkGround && "color".equals(key)) raw = READER_TEXT;
+            if (darkGround && ("bgcolor".equals(key) || "background".equals(key))) continue;
 
             switch (key) {
                 case "style" -> {
@@ -754,8 +765,28 @@ public final class MailHtmlSanitizer {
             if (isPoisonedCss(d)) continue;
             String cleaned = filterCssUrls(d, allowRemoteImages);
             if (cleaned == null) continue;
-            if (darkGround && !bringsOwnGround && ("color".equals(prop) || "border-color".equals(prop))) {
-                cleaned = liftForDarkGround(cleaned);
+            // FORCED DARK. Every ground the sender painted is dropped and every colour
+            // they chose for text becomes the reader's own.
+            //
+            // Two gentler attempts came before this and both failed on real mail. The
+            // first kept sender grounds and re-tuned text against them, which turned a
+            // signature written in Word's purple into bright magenta and left white
+            // slabs stranded in a dark page. The second rendered the whole letter on
+            // white, which is correct by construction and is what Gmail does, and was
+            // rejected outright: a white sheet is not what this product is.
+            //
+            // What is left is the blunt instrument, chosen deliberately. Consistency is
+            // the thing being bought: every message looks the same as every other one,
+            // and none of them can surprise you, which is worth more here than
+            // preserving a sender's palette. IMAGES ARE NOT TOUCHED, so a logo, a
+            // screenshot or a photograph keeps its own colours and remains recognisable.
+            if (darkGround) {
+                if ("background".equals(prop) || "background-color".equals(prop)
+                        || "background-image".equals(prop)) {
+                    continue;
+                }
+                if ("color".equals(prop)) cleaned = "color:" + READER_TEXT;
+                if ("border-color".equals(prop)) cleaned = "border-color:" + READER_BORDER;
             }
             if ("font-size".equals(prop)) cleaned = atLeastReadable(cleaned);
             if (out.length() > 0) out.append(';');
@@ -932,8 +963,62 @@ public final class MailHtmlSanitizer {
         return css(lifted.getRed(), lifted.getGreen(), lifted.getBlue());
     }
 
+    /**
+     * Finds where the quoted thread starts and marks it, so everything from there on is
+     * set back from what the sender actually wrote.
+     *
+     * blockquote handles the clients that use it. These are the ones that do not:
+     * Outlook and its imitators emit a rule and then a From/Sent/To/Subject block at
+     * the same nesting level as the reply, and several webmail clients emit a line like
+     * "---- On 18 Aug 2026 ... wrote ----". In both cases nothing in the markup says
+     * "everything below here is older", so a three-deep thread rendered as one
+     * undifferentiated wall of text by three different people.
+     *
+     * A class rather than a wrapper element, deliberately. The fragment reaching here is
+     * balanced, and splicing an opening div at an arbitrary point with its close at the
+     * end would cross whatever elements happen to be open at that point. A class costs
+     * nothing structurally and the sibling selector in the stylesheet does the rest.
+     *
+     * Only the FIRST match is marked, because the styling cascades to every sibling
+     * after it and a second mark inside an already-quoted region would say nothing new.
+     */
+    static String markQuotedHeaders(String html) {
+        Matcher m = QUOTE_START.matcher(html);
+        if (!m.find()) return html;
+
+        // Walk back to the start tag of the element the marker text sits in, so the
+        // class lands on a real element rather than on whatever tag happens to precede
+        // the words. A marker with no element in front of it is left alone.
+        int open = html.lastIndexOf('<', m.start());
+        while (open >= 0) {
+            if (open + 1 < html.length() && html.charAt(open + 1) != '/') break;
+            open = html.lastIndexOf('<', open - 1);
+        }
+        if (open < 0) return html;
+        int nameEnd = open + 1;
+        while (nameEnd < html.length() && Character.isLetterOrDigit(html.charAt(nameEnd))) nameEnd++;
+        if (nameEnd == open + 1) return html;
+
+        return html.substring(0, nameEnd) + " class=\"jc-quote\"" + html.substring(nameEnd);
+    }
+
+    /**
+     * The shapes a quoted thread announces itself with. Deliberately narrow: a false
+     * positive greys out a message somebody actually wrote, which is worse than missing
+     * an indent, so each alternative needs two signals rather than one stray word.
+     */
+    private static final Pattern QUOTE_START = Pattern.compile(
+            "(-{2,}\\s*Original Message\\s*-{2,})"
+            + "|(-{2,}\\s*On\\b[^<]{0,120}\\bwrote\\s*-{2,})"
+            + "|(<b>\\s*From:\\s*</b>|<strong>\\s*From:\\s*</strong>)"
+            + "|(\\bFrom:[^<]{0,200}?(?:<br\\s*/?>|</p>)\\s*(?:<b>|<strong>)?\\s*(?:Sent|Date):)",
+            Pattern.CASE_INSENSITIVE);
+
     /** The reader's own body colour, matching --jct in the dark wrapper. */
     private static final String READER_TEXT = "#ededed";
+
+    /** Hairlines and rules, so a sender's black border does not vanish on the ground. */
+    private static final String READER_BORDER = "rgba(255,255,255,.14)";
 
     /** Below this a message is not small, it is unreadable on a phone held at arm's length. */
     private static final double MIN_FONT_PX = 14.0;
@@ -1208,7 +1293,7 @@ public final class MailHtmlSanitizer {
      */
     static String wrapDocument(String fragment, boolean allowRemoteImages, String theme) {
         String imgSrc = allowRemoteImages ? "data: https: http:" : "data:";
-        boolean dark = "dark".equalsIgnoreCase(theme);
+        boolean dark = !"light".equalsIgnoreCase(theme) && !"original".equalsIgnoreCase(theme);
         boolean auto = theme == null || theme.isBlank() || "auto".equalsIgnoreCase(theme);
 
         String base = dark ? darkVars() : lightVars();
@@ -1264,6 +1349,33 @@ public final class MailHtmlSanitizer {
                 // it is not needed, while risking flattening something deliberate.
                 // atLeastReadable does the real work, at the declaration.
                 + "p,li,td,th{line-height:1.6}"
+                // QUOTED MATERIAL IS SET BACK FROM WHAT WAS ACTUALLY WRITTEN.
+                //
+                // A reply is a new message on top of everything that came before it, and
+                // without a rule saying which is which the two run together as one wall
+                // of text. Every mail client draws that line; this one was not, so a
+                // three-deep thread read as a single message by three different people.
+                //
+                // The rule nests, so the second quote is set back further than the
+                // first, and the colour steps back with it: what somebody just wrote is
+                // the brightest thing on the page and each older layer recedes. The bar
+                // is what carries it on a phone, where there is not enough width for
+                // indentation alone to be legible.
+                + "blockquote{margin:14px 0;padding:2px 0 2px 14px;"
+                + "border-left:2px solid rgba(255,255,255,.18);color:#c9c9c9}"
+                + "blockquote blockquote{color:#adadad;border-left-color:rgba(255,255,255,.13)}"
+                + "blockquote blockquote blockquote{color:#949494;border-left-color:rgba(255,255,255,.10)}"
+                // Outlook and its imitators do not use blockquote at all. They emit a
+                // horizontal rule and then a From/Sent/To/Subject block at the same
+                // level as the reply, which is why those threads showed no indentation
+                // whatever while a Gmail one did. The class is stamped on by the
+                // tokeniser when it recognises that shape; see markQuotedHeaders.
+                // Stamped on the element that opens the quoted block, and applied to it
+                // and every sibling after it, so no wrapper element has to be inserted
+                // into markup that is already balanced.
+                + ".jc-quote,.jc-quote~*{margin-left:0;padding-left:14px;"
+                + "border-left:2px solid rgba(255,255,255,.18);color:#c9c9c9}"
+                + ".jc-quote{margin-top:16px;padding-top:4px}"
                 + ".jc-plain{white-space:pre-wrap;font:14px/1.65 ui-monospace,\"Cascadia Mono\",Consolas,monospace;margin:0}"
                 + ".jc-empty{color:var(--jcm);font-style:italic}"
                 + ".jc-blocked-img{min-width:26px;min-height:26px;border:1px dashed var(--jcd);"

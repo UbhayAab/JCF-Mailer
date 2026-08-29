@@ -56,13 +56,18 @@ class ReaderGroundTest {
      * belongs to the frame around the letter rather than to the letter.
      */
     @Test
-    void senderHtmlIsPaperWhateverTheAppAsksFor() {
+    void senderHtmlIsForcedDarkWhateverTheAppAsksFor() {
         String doc = MailHtmlSanitizer
                 .toReaderDocument(NEWSLETTER, null, false, "auto").html();
 
-        assertThat(doc).contains("body{background:#ffffff");
-        // The colours the sender chose survive untouched, which is the whole point.
-        assertThat(doc).contains("#333333");
+        assertThat(doc).contains("body{background:#202020");
+        // Nothing the sender chose for text survives. Two gentler rules came before
+        // this one and both failed on real mail: preserving their grounds left white
+        // slabs stranded in a dark page, and re-tuning their text turned a signature in
+        // Word's purple into bright magenta. Forcing every colour is blunt and it is
+        // the only version where two messages look alike.
+        assertThat(doc).doesNotContain("#333333");
+        assertThat(doc).doesNotContain("#222");
         // No prefers-color-scheme anywhere, ours or the sender's. color-scheme pins what
         // the frame may render but does NOT stop it answering the media query, so a
         // sender's dark-mode block still fired against our forced white ground and
@@ -140,20 +145,54 @@ class ReaderGroundTest {
     }
 
     /**
-     * The reverse case, which a naive "force white" fix breaks: a sender who sets a
-     * dark background AND light text. Their pairing has to survive intact.
+     * Even a sender who brought a matched pair loses it, and that is the deliberate
+     * cost of the rule rather than an oversight.
+     *
+     * Keeping such a pair is defensible on its own and was tried. What it produces in a
+     * real mailbox is a page where some blocks follow the reader and others keep their
+     * own palette, so no two messages look alike and several look broken. Consistency
+     * was chosen over fidelity, with images as the one exception, since a logo that
+     * loses its colours stops being recognisable.
      */
     @Test
-    void aSenderWhoBringsBothColoursKeepsThem() {
+    void evenAMatchedPairIsForced() {
         String dark = """
                 <div style="background:#101418;color:#f5f5f5">
                   <p style="color:#ffffff">Light text the sender chose.</p>
+                  <img src="https://example.org/logo.png" alt="a logo">
                 </div>
                 """;
         String doc = MailHtmlSanitizer.toReaderDocument(dark, null, false, "dark").html();
 
-        assertThat(doc).contains("#101418");
-        assertThat(doc).contains("#f5f5f5");
+        assertThat(doc).doesNotContain("#101418");
+        assertThat(doc).doesNotContain("#f5f5f5");
+        assertThat(doc).contains("alt=\"a logo\"");
+    }
+
+    /**
+     * Quoted material is set back from what was actually written, which is what makes a
+     * thread readable as a thread.
+     *
+     * blockquote covers the clients that use it. Outlook and its imitators do not: they
+     * emit a rule and then a From/Sent/To block at the same nesting level as the reply,
+     * so nothing in the markup says the rest is older, and a three-deep thread rendered
+     * as one wall of text by three different people.
+     */
+    @Test
+    void anOutlookStyleQuoteIsMarkedForIndentation() {
+        String reply = """
+                <div><p>Thanks, that works for me.</p><hr>
+                <p><b>From:</b> Javle,Milind<br><b>Sent:</b> 28 August 2026 00:26</p>
+                <p>The original message.</p></div>
+                """;
+        String doc = MailHtmlSanitizer.toReaderDocument(reply, null, false, "dark").html();
+
+        assertThat(doc).contains("class=\"jc-quote\"");
+        // Counted on the ATTRIBUTE, not on the word, because the stylesheet names the
+        // class three more times and counting those measures nothing. Exactly one mark:
+        // the styling cascades to every sibling after it, so a second one inside an
+        // already quoted region would say nothing new.
+        assertThat(doc.split("class=\"jc-quote\"", -1).length - 1).isEqualTo(1);
     }
 
     /**
