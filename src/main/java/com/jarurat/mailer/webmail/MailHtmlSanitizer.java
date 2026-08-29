@@ -986,20 +986,57 @@ public final class MailHtmlSanitizer {
         Matcher m = QUOTE_START.matcher(html);
         if (!m.find()) return html;
 
-        // Walk back to the start tag of the element the marker text sits in, so the
-        // class lands on a real element rather than on whatever tag happens to precede
-        // the words. A marker with no element in front of it is left alone.
-        int open = html.lastIndexOf('<', m.start());
-        while (open >= 0) {
-            if (open + 1 < html.length() && html.charAt(open + 1) != '/') break;
-            open = html.lastIndexOf('<', open - 1);
-        }
+        // Walk back to the nearest BLOCK-level start tag, not merely the nearest tag.
+        //
+        // This is the difference between the indent working and the indent looking like
+        // it half works. The marker text is almost always inside an inline run, because
+        // these headers are written as "<b>From:</b> somebody", so the nearest tag going
+        // backwards is that <b>. Marking it puts the rule on the bold word, and the
+        // sibling selector then reaches the rest of that one line and stops: the header
+        // is set back and the message it belongs to is not, which was exactly the
+        // reported symptom. The block that CONTAINS the header is the thing the quoted
+        // message is a sibling of, so that is what has to carry the class.
+        int open = nearestBlockStart(html, m.start());
         if (open < 0) return html;
         int nameEnd = open + 1;
         while (nameEnd < html.length() && Character.isLetterOrDigit(html.charAt(nameEnd))) nameEnd++;
         if (nameEnd == open + 1) return html;
 
         return html.substring(0, nameEnd) + " class=\"jc-quote\"" + html.substring(nameEnd);
+    }
+
+    /**
+     * Elements the quoted message can be a sibling of. Inline runs are excluded on
+     * purpose: marking a b, span or font puts the rule on a few words rather than on the
+     * block that the rest of the thread follows.
+     */
+    private static final Set<String> BLOCK_LEVEL = Set.of(
+            "p", "div", "table", "blockquote", "section", "article", "header", "footer",
+            "main", "aside", "nav", "ul", "ol", "li", "td", "th", "tr", "h1", "h2", "h3",
+            "h4", "h5", "h6", "pre", "hr", "center", "figure", "dl", "dd", "dt");
+
+    /**
+     * The nearest block-level start tag at or before a position, or -1.
+     *
+     * A scan rather than a parse. The fragment is balanced by the time this runs, so a
+     * backwards walk that skips closing tags finds the enclosing block in every shape
+     * these headers actually arrive in, and a wrong answer costs an indent rather than
+     * correctness. A full ancestor walk would need the tree this class deliberately
+     * never builds.
+     */
+    private static int nearestBlockStart(String html, int from) {
+        int at = html.lastIndexOf('<', from);
+        while (at >= 0) {
+            int nameStart = at + 1;
+            if (nameStart < html.length() && html.charAt(nameStart) != '/' && html.charAt(nameStart) != '!') {
+                int nameEnd = nameStart;
+                while (nameEnd < html.length() && Character.isLetterOrDigit(html.charAt(nameEnd))) nameEnd++;
+                String name = html.substring(nameStart, nameEnd).toLowerCase(Locale.ROOT);
+                if (BLOCK_LEVEL.contains(name)) return at;
+            }
+            at = html.lastIndexOf('<', at - 1);
+        }
+        return -1;
     }
 
     /**
