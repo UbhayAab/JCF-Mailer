@@ -750,7 +750,12 @@ function neRenderPreview() {
     + 'border-bottom:1px solid #e5e7eb;color:#111"><b>' + esc(subject) + '</b>'
     + (pre ? '<br><span style="color:#6b7280">' + esc(pre) + '</span>' : '') + '</div>';
 
-  $('nePreviewFrame').srcdoc = banner + body;
+  // Wrapped, for the reason previewDocument explains: a bare fragment in a srcdoc
+  // frame has no ground and no colour scheme of its own, so a creative carrying a
+  // dark-mode block paints light text on white and the preview reads as blank.
+  // journey.js is loaded after console.js in console.html, which is the only page
+  // that hosts this canvas, so the helper is in scope.
+  $('nePreviewFrame').srcdoc = previewDocument(banner + body);
 }
 
 function neRenderNote() {

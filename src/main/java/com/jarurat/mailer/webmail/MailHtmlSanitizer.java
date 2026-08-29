@@ -656,6 +656,41 @@ public final class MailHtmlSanitizer {
         return rebuildRules(css, allowRemoteImages, 0);
     }
 
+    private static final Pattern PREFERS_DARK =
+            Pattern.compile("prefers-color-scheme\\s*:\\s*dark", Pattern.CASE_INSENSITIVE);
+    private static final Pattern PREFERS_LIGHT =
+            Pattern.compile("prefers-color-scheme\\s*:\\s*light", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * How an at-rule's media query relates to the light ground the reader forces.
+     *
+     * Returns -1 when the block can never apply and must be dropped, 1 when it always
+     * applies and should be unwrapped so it fires whatever the reader's machine is set
+     * to, and 0 when the colour scheme is not mentioned and the rule is left alone.
+     *
+     * A query that mentions the scheme alongside other conditions, such as a width, is
+     * deliberately left alone: unwrapping it would apply rules at every width, which
+     * breaks layout, and that is a worse outcome than a style that quietly does not
+     * fire. Legibility is the thing being protected here, and the dark branch, which is
+     * the one that makes text vanish, is dropped in every form.
+     */
+    private static int colourSchemeIntent(String prelude) {
+        boolean dark = PREFERS_DARK.matcher(prelude).find();
+        boolean light = PREFERS_LIGHT.matcher(prelude).find();
+        if (!dark && !light) return 0;
+        // "not (prefers-color-scheme: dark)" means light, and the negation flips both.
+        boolean negated = prelude.toLowerCase(Locale.ROOT).contains("not ");
+        if (dark && light) return 0;                    // both branches in one query, leave it
+        boolean selectsDark = negated != dark;          // XOR
+        if (selectsDark) return -1;
+        // Only unwrap when the scheme is the whole condition. Anything else keeps its
+        // wrapper, for the reason in the method comment.
+        String rest = PREFERS_LIGHT.matcher(PREFERS_DARK.matcher(prelude).replaceAll(""))
+                .replaceAll("")
+                .replaceAll("(?i)@media|not |and|only|screen|all|[(),\\s]", "");
+        return rest.isEmpty() ? 1 : 0;
+    }
+
     private static final Pattern SELECTOR = Pattern.compile("[A-Za-z0-9 \t\r\n.#>+~*:,()\\[\\]='\"_-]{1,400}");
     private static final Pattern SAFE_AT_RULE = Pattern.compile("@(media|supports)[A-Za-z0-9 \t\r\n:()\\-,.&|]*",
             Pattern.CASE_INSENSITIVE);
@@ -678,7 +713,28 @@ public final class MailHtmlSanitizer {
                 // fetch from a third party, which is exactly what we are preventing.
                 if (depth > 0 || !SAFE_AT_RULE.matcher(prelude).matches()) continue;
                 String inner = rebuildRules(block, allowRemoteImages, depth + 1);
-                if (!inner.isEmpty()) out.append(prelude).append('{').append(inner).append('}');
+                if (inner.isEmpty()) continue;
+
+                // The reader forces a light ground for sender HTML (see wrapDocument),
+                // but forcing it does NOT stop the frame answering
+                // prefers-color-scheme: dark, because color-scheme sets what the page
+                // can render, not what the media query reports. Every current email
+                // builder emits a dark-mode block, so on a machine set to dark the
+                // sender's own rules were painting white text onto our forced white
+                // paper. Measured at a contrast ratio of 1.00: the whole letter was one
+                // colour and read as an empty message. That is the reported bug arriving
+                // by a second route, and it is why the ground and the media query have to
+                // agree rather than only the ground being pinned.
+                //
+                // So the frame is made to behave as though the operating system were
+                // light: a dark-scheme block cannot apply and is dropped, and a
+                // light-scheme block always applies and is unwrapped so it fires even
+                // when the reader's machine is dark.
+                int scheme = colourSchemeIntent(prelude);
+                if (scheme < 0) continue;
+                if (scheme > 0) { out.append(inner); continue; }
+
+                out.append(prelude).append('{').append(inner).append('}');
                 continue;
             }
             if (prelude.isEmpty() || !SELECTOR.matcher(prelude).matches()) continue;
@@ -820,23 +876,30 @@ public final class MailHtmlSanitizer {
                 + "<style>:root{color-scheme:" + (dark ? "dark" : auto ? "light dark" : "light") + ";"
                 + base + "}" + autoBlock
                 + "html,body{margin:0;padding:0}"
-                + "body{background:var(--b);color:var(--t);"
+                // Literals, not var(), for the ground and the default text colour.
+                // The sender's own stylesheet is emitted inside <body>, after this one,
+                // so a ":root{--jcb:...}" declaration in it would win and repaint the
+                // surface the whole legibility decision rests on. Everything else may
+                // safely go through a custom property; these two may not.
+                + "html{background:" + (dark ? "#202020" : "#ffffff") + "}"
+                + "body{background:" + (dark ? "#202020" : "#ffffff") + ";"
+                + "color:" + (dark ? "#ededed" : "#14212a") + ";"
                 + "font:14.5px/1.68 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;"
                 + "padding:2px 2px 24px;word-wrap:break-word;overflow-wrap:break-word}"
-                + "a{color:var(--l)}"
+                + "a{color:var(--jcl)}"
                 + "img{max-width:100%;height:auto}"
                 + "table{max-width:100%}"
                 + ".jc-plain{white-space:pre-wrap;font:14px/1.65 ui-monospace,\"Cascadia Mono\",Consolas,monospace;margin:0}"
-                + ".jc-empty{color:var(--m);font-style:italic}"
-                + ".jc-blocked-img{min-width:26px;min-height:26px;border:1px dashed var(--d);"
-                + "border-radius:4px;background:var(--s)}"
+                + ".jc-empty{color:var(--jcm);font-style:italic}"
+                + ".jc-blocked-img{min-width:26px;min-height:26px;border:1px dashed var(--jcd);"
+                + "border-radius:4px;background:var(--jcs)}"
                 + "</style></head><body>" + fragment + "</body></html>";
     }
 
     // Colour literals rather than the console's CSS custom properties, because a
     // sandboxed frame is a separate document and inherits nothing from its parent.
     private static String lightVars() {
-        return "--b:#ffffff;--t:#14212a;--l:#00697f;--m:#7b8d99;--d:#dde5e8;--s:#eef2f3;";
+        return "--jcb:#ffffff;--jct:#14212a;--jcl:#00697f;--jcm:#7b8d99;--jcd:#dde5e8;--jcs:#eef2f3;";
     }
 
     /**
@@ -850,7 +913,7 @@ public final class MailHtmlSanitizer {
      * reaches these literals. See UI-SPEC section 2: flat charcoal, never navy.
      */
     private static String darkVars() {
-        return "--b:#202020;--t:#ededed;--l:#7aa8ff;--m:#949494;--d:#343434;--s:#252525;";
+        return "--jcb:#202020;--jct:#ededed;--jcl:#7aa8ff;--jcm:#949494;--jcd:#343434;--jcs:#252525;";
     }
 
     // ------------------------------------------------------------------ escaping

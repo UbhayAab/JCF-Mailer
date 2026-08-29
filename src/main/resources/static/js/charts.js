@@ -10,7 +10,12 @@
    broken page rather than as "no sends yet".
    ========================================================================== */
 
-const CHART_COLORS = ['#2f6fed', '#19a7a0', '#d99e0b', '#8b5cf6', '#e0483c', '#1f9d55'];
+/* The fourth entry was #8b5cf6, a violet, which contradicts the one colour rule the
+   design system actually states: flat charcoal and one accent, never navy, never
+   purple. It was legible, so no contrast pass ever flagged it; it was simply not part
+   of the palette. Replaced with a slate that reads as a distinct series without
+   introducing a hue the product uses nowhere else. */
+const CHART_COLORS = ['#2f6fed', '#19a7a0', '#d99e0b', '#7f93a3', '#e0483c', '#1f9d55'];
 
 function chartEmpty(el, message) {
   el.innerHTML = '<div class="chart-empty">' + escapeHtml(message || 'No data yet') + '</div>';

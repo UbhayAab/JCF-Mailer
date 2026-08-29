@@ -40,8 +40,10 @@ class ReaderGroundTest {
         // The sender's own colours must survive, because stripping them mangles every
         // newsletter and every signature. What changes is the ground under them.
         assertThat(doc).contains("#333333");
-        assertThat(doc).contains("--b:#ffffff");
-        assertThat(doc).doesNotContain("--b:#202020");
+        // Asserted on the painted ground rather than on a custom property, because the
+        // property was exactly what a sender could redefine from their own stylesheet.
+        assertThat(doc).contains("body{background:#ffffff");
+        assertThat(doc).doesNotContain("body{background:#202020");
         assertThat(doc).contains("color-scheme:light");
     }
 
@@ -51,9 +53,11 @@ class ReaderGroundTest {
         String doc = MailHtmlSanitizer
                 .toReaderDocument(NEWSLETTER, null, false, "auto").html();
 
-        assertThat(doc).contains("--b:#ffffff");
-        // No prefers-color-scheme block, or a machine set to dark reintroduces the bug
-        // for exactly the people who would never think to report it.
+        assertThat(doc).contains("body{background:#ffffff");
+        // No prefers-color-scheme anywhere, ours or the sender's. color-scheme pins what
+        // the frame may render but does NOT stop it answering the media query, so a
+        // sender's dark-mode block still fired against our forced white ground and
+        // painted white on white. Measured at 1.00:1 before this.
         assertThat(doc).doesNotContain("prefers-color-scheme");
     }
 
@@ -66,11 +70,61 @@ class ReaderGroundTest {
         String doc = MailHtmlSanitizer
                 .toReaderDocument(null, "Just a plain note.\nNo HTML at all.", false, "dark").html();
 
-        assertThat(doc).contains("--b:#202020");
+        assertThat(doc).contains("body{background:#202020");
         assertThat(doc).contains("color-scheme:dark");
         assertThat(doc).contains("jc-plain");
         // The charcoal the console uses, not the blue slate this frame used to carry.
         assertThat(doc).doesNotContain("#121c22");
+    }
+
+    /**
+     * The second route to the same bug, which survived the first fix.
+     *
+     * Forcing the ground to white does not stop the frame answering
+     * prefers-color-scheme: dark, because color-scheme declares what a page is willing
+     * to render, not what the media query reports. Every current email builder emits a
+     * dark-mode block, so on a machine set to dark the sender's own rules painted white
+     * text onto our forced white paper. Measured at 1.00:1, one distinct colour across
+     * the whole painted region, which reads as an empty message.
+     *
+     * The frame is therefore made to behave as though the machine were light: the dark
+     * branch cannot apply and is dropped, and the light branch always applies and is
+     * unwrapped so it fires even when the reader's machine is dark.
+     */
+    @Test
+    void aSenderDarkModeBlockCannotPaintOnTheForcedWhiteGround() {
+        String builderOutput = """
+                <style>
+                  .h{color:#222222} .t{color:#333333}
+                  @media (prefers-color-scheme: dark){ .h{color:#ffffff} .t{color:#e8e8e8} }
+                  @media (prefers-color-scheme: light){ .t{font-weight:600} }
+                </style>
+                <div><p class="h">Your payslip</p><p class="t">Raise any discrepancy.</p></div>
+                """;
+        String doc = MailHtmlSanitizer.toReaderDocument(builderOutput, null, false, "dark").html();
+
+        assertThat(doc).contains("#222222").contains("#333333");
+        assertThat(doc).doesNotContain("#e8e8e8");          // the dark branch is gone
+        assertThat(doc).contains("font-weight:600");        // the light branch still fires
+        assertThat(doc).doesNotContain("prefers-color-scheme");
+    }
+
+    /**
+     * A sender's stylesheet is emitted inside the body, after the wrapper's own rules,
+     * so anything the wrapper expresses as a custom property can be redefined by the
+     * message being rendered. The ground and the default text colour are therefore
+     * written as literals, and this pins that.
+     */
+    @Test
+    void aSenderCannotRepaintTheGroundThroughTheWrappersOwnVariables() {
+        String hijack = """
+                <style>:root{--jcb:#151515;--jct:#181818;--b:#151515;--t:#181818}</style>
+                <div><p>Text that tried to repaint the ground under itself.</p></div>
+                """;
+        String doc = MailHtmlSanitizer.toReaderDocument(hijack, null, false, "dark").html();
+
+        assertThat(doc).contains("body{background:#ffffff");
+        assertThat(doc).doesNotContain("body{background:var(");
     }
 
     /**

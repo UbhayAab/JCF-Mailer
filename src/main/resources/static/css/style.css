@@ -175,12 +175,63 @@ mark { background: rgba(217, 158, 11, .30); color: var(--text); }
 
 /* Every control the user agent tints for itself. accent-color covers ticks,
    radios, ranges and progress; caret-color covers the text cursor. Left unset
-   each one falls back to the platform blue. */
+   each one falls back to the platform blue.
+
+   accent-color sits on :root as well as on the three control tags, because it
+   inherits and the tag list only reaches the controls that exist today. A
+   measured sweep found :root computing accent-color: auto, so anything the
+   platform tints that is not an input, a textarea or a select was still on the
+   platform blue by default. Nothing on the page is in that position right now,
+   which is exactly why it is worth closing before something is. */
+:root { accent-color: var(--primary); }
 input, textarea, select { accent-color: var(--primary); caret-color: var(--primary); }
 progress { accent-color: var(--primary); }
 
+/* The placeholder is set again on the bare tags, under the .input rule further
+   down, because that rule is the only one in this file that names a placeholder
+   and it only reaches a control that was given the class. A field written
+   without it would take the user agent grey against --field, and the user agent
+   grey is not a colour this file has ever chosen. */
+input::placeholder, textarea::placeholder { color: var(--text-mute); opacity: 1; }
+
+/* An option list is drawn by the platform, so the ground under it was the
+   operating system's choice while the text on it was ours. That is the same
+   split that put dark text on a dark ground in the reader. Naming both ends it.
+   The popup is an operating system surface and does not appear in a page
+   screenshot, so this one is reasoned rather than measured. */
+option, optgroup { background-color: var(--panel); color: var(--text); }
+
+/* The autofill wash. Chrome paints a filled field from its own palette and wins
+   with a user agent important rule that no background-color can beat, so the
+   fill has to be forged from an inset shadow and the text recoloured directly.
+   Without this a remembered address arrives on a ground this file never picked.
+   Headless Chromium cannot be made to autofill, so unlike the rest of this
+   block it is not measured here. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+textarea:-webkit-autofill {
+  -webkit-text-fill-color: var(--text);
+  -webkit-box-shadow: inset 0 0 0 100px var(--field);
+  caret-color: var(--primary);
+}
+input:-webkit-autofill:focus { -webkit-box-shadow: inset 0 0 0 100px var(--field-focus); }
+/* A select is kept out of the fill above on purpose. An inset shadow is painted
+   over the background image and under the border, so filling a select that way
+   would hide the chevron for as long as the value was autofilled, which is the
+   same disappearance the focus rule further down was just fixed for. The text
+   colour is safe to state on its own and the field already carries an opaque
+   background of its own, so only the wash would be left showing, and only on a
+   select Chrome decided to fill. */
+select:-webkit-autofill { -webkit-text-fill-color: var(--text); caret-color: var(--primary); }
+
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
+/* Where a horizontal and a vertical bar meet. Styling any part of the scrollbar
+   hands the whole widget to this file, the corner included, and an unnamed
+   corner is then the user agent's to fill. It measures as the panel colour
+   today, so this names what is already true rather than repainting it. */
+::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 6px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.24); background-clip: content-box; }
 
@@ -407,9 +458,18 @@ label.field > span .hint { letter-spacing: 0; font-weight: 400; color: var(--tex
 /* The ring itself comes from :focus-visible, which a text field matches on a
    click as well as on a tab. The border and the fill move too, so a field that
    was focused programmatically still reads as the live one. */
-.input:focus { border-color: var(--primary); background: var(--field-focus); outline: none; }
+/* background-color, not the background shorthand, and this is load bearing. The
+   chevron on select.input below is a background IMAGE, and the shorthand resets
+   background-image to none. Both of these rules match a select and outrank
+   select.input, so writing them as a shorthand deleted the arrow for exactly as
+   long as the control was focused or disabled: measured at 4.99:1 against the
+   field at rest and at zero ink in both of those states, on a control that also
+   carries appearance: none and so has no native arrow to fall back on. A
+   focused select looked like a text box. .skeleton and .jrn-canvas already
+   split the colour from the image for the same reason. */
+.input:focus { border-color: var(--primary); background-color: var(--field-focus); outline: none; }
 .input:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.input:disabled { background: var(--panel-2); color: var(--text-mute); cursor: not-allowed; }
+.input:disabled { background-color: var(--panel-2); color: var(--text-mute); cursor: not-allowed; }
 textarea.input { resize: vertical; font-family: var(--mono); font-size: var(--fs-sm); line-height: 1.6; min-height: 120px; padding: var(--sp-2) 10px; }
 select.input {
   appearance: none;
@@ -655,9 +715,21 @@ table.data td.actions { display: flex; gap: 6px; padding-top: var(--sp-2); paddi
 .chip:hover { background: var(--panel-4); border-color: var(--border-strong); }
 .chip.static { cursor: default; }
 
-/* ---------- preview ---------- */
+/* ---------- preview ----------
+   The one surface in the console that is deliberately light, because it shows
+   somebody else's email and an email is composed against white. The literal
+   #fff is right for that reason and is not a token.
+
+   color-scheme has to be said out loud here. It inherits, so this element was
+   computing dark while painting white and hosting light content, and the used
+   scheme of an embedded document is taken from the embedder. Chrome does not
+   currently push it across a sandbox="" boundary, so the frame measures light
+   at 16 to 21:1 either way today; that is luck, not a decision, and it is the
+   same shape of accident as text that keeps its colour when its ground moves.
+   Declared light, the ground, any control inside a creative and the frame's own
+   scrollbar all agree without depending on that. */
 .preview-frame { width: 100%; height: 430px; border: 1px solid var(--border);
-                 border-radius: var(--r-sm); background: #fff; }
+                 border-radius: var(--r-sm); background: #fff; color-scheme: light; }
 .preview-frame.mobile { width: 390px; max-width: 100%; }
 .preview-shell { display: flex; justify-content: center; }
 

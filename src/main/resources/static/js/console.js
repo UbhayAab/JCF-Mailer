@@ -844,7 +844,34 @@ function updatePreview() {
   const banner = '<div style="font:13px/1.4 system-ui;padding:10px 14px;background:#f3f4f6;'
     + 'border-bottom:1px solid #e5e7eb;color:#374151"><b>' + esc($('cSubject').value || 'No subject')
     + '</b>' + (pre ? ' <span style="color:#9ca3af">- ' + esc(pre) + '</span>' : '') + '</div>';
-  $('previewFrame').srcdoc = banner + body;
+  $('previewFrame').srcdoc = previewDocument(banner + body);
+}
+
+/**
+ * Wraps campaign HTML in a real document before it goes into a preview frame.
+ *
+ * Assigning a bare fragment to srcdoc leaves the frame with no ground of its own and
+ * no colour scheme, so the browser answers prefers-color-scheme from the operating
+ * system. A creative carrying the dark-mode block that every current email builder
+ * emits then paints its light text onto the white the frame is showing, and the
+ * preview goes blank at a contrast ratio of 1.00 on any machine set to dark. The
+ * same defect in the mailbox reader is what made messages look empty.
+ *
+ * A preview has to show what the recipient will see, and this pins that to the light
+ * rendering the campaign was designed against, rather than to the setting on the
+ * laptop of whoever happens to be checking it. Kept in step with
+ * MailHtmlSanitizer.wrapDocument, which does the same job for received mail.
+ */
+function previewDocument(inner) {
+  return '<!doctype html><html><head><meta charset="utf-8">'
+    + '<meta name="color-scheme" content="light">'
+    + '<style>:root{color-scheme:light}'
+    + 'html,body{margin:0;padding:0;background:#ffffff;color:#14212a}'
+    + 'img{max-width:100%;height:auto}'
+    // The frame is pinned light, so a dark-scheme block can never be the right
+    // rendering and would only ever fight the ground underneath it.
+    + '@media (prefers-color-scheme:dark){html,body{background:#ffffff;color:#14212a}}'
+    + '</style></head><body>' + inner + '</body></html>';
 }
 
 /**

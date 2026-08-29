@@ -191,7 +191,7 @@
                 background:var(--field-bg);border:1px solid var(--border-strong);
                 border-radius:var(--radius-xs);color:var(--text);font-size:13px;line-height:18px;outline:none;
                 transition:border-color var(--t-fast),box-shadow var(--t-fast),background var(--t-fast)}
-        .search::placeholder{color:var(--text-faint)}
+        .search::placeholder{color:var(--text-mute)}
         .search:focus{border-color:var(--primary);box-shadow:0 0 0 2px rgba(47,111,237,.25);
                       background:var(--field-bg-focus)}
 
@@ -365,6 +365,12 @@
         .msg.on .from{color:var(--text);font-weight:650}
         .msg.on .subj{color:var(--text)}
         .msg.on .prev{color:var(--text-dim)}
+        /* The selected and hovered rows sit on a lighter ground than the rest of the
+           list, so the muted tones that clear 4.5:1 against the panel do not clear it
+           here. Measured on the selected row before this: the timestamp 4.49:1 and the
+           separator 3.56:1. A row is not less readable for being the one you chose. */
+        .msg.on .when{color:var(--text-dim)}
+        .msg.on .prev::before,.msg:hover .prev::before{color:var(--text-mute)}
         /* A grid cell of its own, never a float inside the subject. text-overflow
            is computed ignoring floats, so a floated paperclip had the ellipsised
            subject running underneath it. */
@@ -534,7 +540,7 @@
                 background:var(--field-bg);border:1px solid var(--border-strong);
                 border-radius:var(--radius-xs);color:var(--text);font-size:13px;line-height:18px;
                 outline:none;transition:border-color var(--t-fast),box-shadow var(--t-fast),background var(--t-fast)}
-        .field input::placeholder,.field textarea::placeholder{color:var(--text-faint)}
+        .field input::placeholder,.field textarea::placeholder{color:var(--text-mute)}
         .field input:focus,.field textarea:focus{border-color:var(--primary);
                 box-shadow:0 0 0 2px rgba(47,111,237,.25);background:var(--field-bg-focus)}
         .field textarea{resize:vertical;font-family:var(--sans);min-height:120px;padding:8px 10px}
@@ -681,7 +687,7 @@
                subject, which is the column that can afford it. */
             .msg .prev{display:none;flex:1 1 0;min-width:96px;color:var(--text-mute);
                        font-size:12.5px;line-height:20px}
-            .msg .prev::before{content:"\00b7";margin:0 8px;color:var(--text-faint)}
+            .msg .prev::before{content:"\00b7";margin:0 8px;color:var(--text-mute)}
             .msg .marks{order:8;padding-top:0}
             .msg .when{order:9;margin-left:auto;font-size:11px}
             .msg::after{display:none}
