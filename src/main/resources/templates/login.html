@@ -86,6 +86,41 @@
         .si-go { width: 100%; min-height: 46px; margin-top: 6px;
                  font-size: 14.5px; border-radius: var(--r-sm, 8px); }
 
+        /* ---------- keep me signed in ---------- */
+        /* Default on, because we cannot tell a phone from a shared laptop and
+           guessing wrong the other way costs everybody two passwords a day. The
+           copy therefore has to carry the cost of being wrong, which is why the
+           second line names what somebody holding the device can do and where the
+           control to undo it lives. A convenience with a hidden price is the one
+           thing this row must not be. */
+        .si-remember { position: relative; display: flex; gap: 12px; align-items: flex-start;
+                       margin: 4px 0 16px; padding: 10px 12px 10px 10px;
+                       border: 1px solid var(--border); border-radius: var(--r-sm, 8px);
+                       background: var(--panel-2); cursor: pointer; }
+        .si-remember:hover { border-color: var(--border-strong); }
+        /* The input is the 44x44 hit area and is invisible; the drawn box beside it
+           is what people see. Growing the box itself to 44px would put a checkbox
+           the size of a button next to 12px text, and the spec asks for the hit
+           area to be padded rather than the glyph grown. */
+        .si-remember input { position: absolute; left: 0; top: 0; width: 44px; height: 44px;
+                             margin: 0; opacity: 0; cursor: pointer; }
+        .si-box { flex: none; width: 20px; height: 20px; margin-top: 1px; border-radius: 5px;
+                  border: 1px solid var(--border-strong); background: var(--field-bg, #262626);
+                  display: grid; place-items: center; color: #fff;
+                  transition: background 120ms cubic-bezier(.2, .7, .3, 1),
+                              border-color 120ms cubic-bezier(.2, .7, .3, 1); }
+        .si-box .ic { width: 13px; height: 13px; stroke-width: 2.6; opacity: 0; }
+        .si-remember input:checked ~ .si-box { background: var(--primary); border-color: var(--primary); }
+        .si-remember input:checked ~ .si-box .ic { opacity: 1; }
+        /* The invisible input cannot show a ring, so the ring moves to the box it
+           drives. Removing it instead is never an option. */
+        .si-remember input:focus-visible ~ .si-box { outline: 2px solid var(--primary); outline-offset: 2px; }
+        .si-rem-t { min-width: 0; }
+        .si-rem-t b { display: block; font-size: 13.5px; font-weight: 600; color: var(--text); }
+        .si-rem-t span { display: block; margin-top: 3px; font-size: 12px; line-height: 1.5;
+                         color: var(--text-mute); }
+        @media (prefers-reduced-motion: reduce) { .si-box { transition: none; } }
+
         .si-help { margin: 18px 0 0; padding-top: 16px; border-top: 1px solid var(--border);
                    font-size: 12.5px; line-height: 1.55; color: var(--text-mute); }
 
@@ -195,6 +230,34 @@
                         </button>
                     </div>
                 </div>
+
+                <!--
+                  The long-lived device session. An unchecked box posts nothing at
+                  all, so the server reads a missing "remember" as off; checked it
+                  posts remember=true, and the server mints a device token that
+                  brings back both halves of the sign in on the next visit - the
+                  console session and the mailbox credential - which is what stops
+                  the second password prompt from appearing again tomorrow.
+
+                  It is checked by default deliberately. Defaulting it on for a
+                  phone and off for a shared laptop is the instinct, and it is not
+                  available to us: nothing in a request tells the two apart, and a
+                  guess that lands wrong on a phone costs two passwords a day for
+                  the sake of a laptop case that the sentence below already covers.
+                -->
+                <label class="si-remember" for="siRemember">
+                    <input type="checkbox" id="siRemember" name="remember" value="true" checked>
+                    <span class="si-box" aria-hidden="true">
+                        <svg class="ic" aria-hidden="true"><use href="#i-check"/></svg>
+                    </span>
+                    <span class="si-rem-t">
+                        <b>Stay signed in on this device</b>
+                        <span>Skip both passwords on your next visit. It also means anyone
+                            holding this device can open your mailbox, so turn it off on a
+                            shared computer. Sign any device out later from You, then
+                            Devices, in your mailbox.</span>
+                    </span>
+                </label>
 
                 <!-- Carries the "Campaign Studio" choice from the landing page through
                      the sign in. It cannot ride on the session instead: session fixation

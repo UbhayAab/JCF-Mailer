@@ -1,6 +1,9 @@
 package com.jarurat.mailer.push;
 
+import com.jarurat.mailer.models.MailboxSettings;
 import jakarta.annotation.PreDestroy;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -48,6 +51,22 @@ public class PushService {
      */
     private final ExecutorService fanOut = Executors.newVirtualThreadPerTaskExecutor();
 
+    /**
+     * How the rules row is read, and why it is not a constructor argument.
+     *
+     * Field injection rather than a sixth constructor parameter because the constructor
+     * is called by hand in tests that own no database and have no business growing one,
+     * and because a notification that cannot reach the rules must still be sent. An
+     * entity manager that is null is therefore a supported state and not a bug: it means
+     * the rules could not be consulted, which rulesFor reports as null and every caller
+     * has to have an answer for. It goes through the entity manager rather than a Spring
+     * Data interface for the reason NotificationRuleApi writes down at length: a
+     * repository would be a new file in a package this phase does not own, and find
+     * against a single primary key is exactly what one would have generated.
+     */
+    @PersistenceContext
+    private EntityManager em;
+
     public PushService(PushSubscriptionRepository subscriptions, WebPushSender sender,
                        PushHealth health, VapidKeys keys,
                        @Value("${jarurat.push.ttl-seconds:86400}") int ttlSeconds) {
@@ -74,22 +93,92 @@ public class PushService {
      * application can raise entirely on its own.
      *
      * A scheduled message failing at six in the morning is invisible today: the person
-     * believes it went, and nothing tells them otherwise until they go looking. This
-     * is lane A and sticky on purpose, because it is the one mail event where
-     * dismissing the notification by accident loses the only warning there is.
+     * believes it went, and nothing tells them otherwise until they go looking. It is
+     * sticky on purpose, because it is the one mail event where dismissing the
+     * notification by accident loses the only warning there is.
+     *
+     * The lane is asked for and no longer assumed. This method used to build lane A
+     * unconditionally, which is how a mailbox with quiet hours switched on was woken at
+     * three in the morning by a send that could not usefully be retried until eight, and
+     * why decideSendFailure existed for a while with nothing calling it. Quiet hours are
+     * the only thing that moves this one, because a failed send has no folder, no sender
+     * and no recipient list to judge; see decideSendFailure.
      */
     public CompletableFuture<List<PushDelivery>> sendFailed(String mailbox, long queuedId,
                                                             String subject, String recipient,
                                                             String sentence) {
-        return notify(mailbox, PushNotification.interrupt(
+        NotificationRules rules = rulesFor(mailbox);
+        String lane;
+        if (rules == null) {
+            // The one place in this application where interrupting without having asked
+            // is the right answer, written down rather than left to fall out of a
+            // default. Reaching here means the rules could not be read at all, which is
+            // the database being unreachable rather than anybody's preference. A failed
+            // send is a handful of events a week, this is the only channel that reports
+            // it, and there is no screen that will bring it up later. Every other lane in
+            // this application errs the other way, towards silence.
+            lane = PushNotification.LANE_INTERRUPT;
+        } else {
+            // code() and not a second mapping written here: Lane says which letter it is,
+            // once, next to the definition. A send failure is never lane C, because
+            // decideSendFailure only ever interrupts or is quieted to lane B.
+            lane = rules.decideSendFailure(Instant.now()).lane().code();
+        }
+
+        String body = (recipient == null || recipient.isBlank() ? "" : "To " + recipient + ", ")
+                + "\"" + (subject == null || subject.isBlank() ? "(no subject)" : subject) + "\"\n"
+                + (sentence == null ? "It was not delivered." : sentence);
+
+        // Built here rather than through PushNotification.interrupt or .deliver, because
+        // neither carries the combination this one notification needs: the lane is
+        // whatever the rules just said, while renotify and requireInteraction stay on in
+        // both of them. Quiet hours take the sound off a notification. They do not make
+        // it dismissable by accident, and this is the message where being dismissed by
+        // accident loses the only warning there is.
+        return notify(mailbox, new PushNotification(
                 "send-failed",
+                lane,
                 "Message not sent",
-                (recipient == null || recipient.isBlank() ? "" : "To " + recipient + ", ")
-                        + "\"" + (subject == null || subject.isBlank() ? "(no subject)" : subject) + "\"\n"
-                        + (sentence == null ? "It was not delivered." : sentence),
+                body,
                 "jm-fail:" + queuedId,
                 true,
+                true,
+                System.currentTimeMillis(),
                 java.util.Map.of("kind", "outbox", "url", "/mail?outbox=" + queuedId)));
+    }
+
+    /**
+     * The notification rules in force for a mailbox, or null when they could not be read.
+     *
+     * Null and default are deliberately different answers. A mailbox that has never
+     * opened the settings sheet has no row, and the right rules for it are the defaults
+     * a fresh NotificationRules carries - Inbox on Direct, quiet from 21:00 to 08:00 -
+     * because those are the same rules the settings screen would show that person. Null
+     * means something else entirely: the question could not be put. Callers must say so
+     * rather than quietly picking a lane, which is the failure this whole change exists
+     * to undo.
+     *
+     * Read outside a transaction on purpose. The collections on NotificationRules are
+     * eager precisely so that a rule can be evaluated from a poll or a fan-out that
+     * holds no transaction, and wrapping either of those in one would mean holding a
+     * database connection across a JMAP or a Web Push round trip.
+     *
+     * It is public and lives here because the poll path needs the same lookup and a
+     * second copy of it, or a repository file in a package this phase does not own,
+     * would both be worse than one method with the reason attached.
+     */
+    public NotificationRules rulesFor(String mailbox) {
+        if (em == null) return null;
+        try {
+            NotificationRules found = em.find(NotificationRules.class,
+                    MailboxSettings.normaliseAddress(mailbox));
+            return found == null ? new NotificationRules(mailbox) : found;
+        } catch (RuntimeException e) {
+            // A notification is worth more than the reason its rules could not be loaded,
+            // so this reports "could not ask" and lets the caller decide, rather than
+            // taking down the outbox sweep or the poll that called it.
+            return null;
+        }
     }
 
     /**

@@ -90,7 +90,10 @@ async function post(url, params) {
  */
 function handled(e) {
   if (!(e instanceof Locked)) return false;
-  if (S.booting) return true;
+  // S.restoring joins S.booting here for the same reason. While the device is
+  // handing the mailbox credential back, every mail endpoint answers 409, and a
+  // 409 that is about to stop being true must not put a password prompt up.
+  if (S.booting || S.restoring) return true;
   openUnlock(e.message);
   return true;
 }
@@ -110,6 +113,7 @@ const S = {
   selected: null,
   query: '',
   booting: true,
+  restoring: false,    // the device is handing the mailbox credential back right now
   reader: null,        // the message object the reader is showing
   readerFor: null,     // the id it was asked for, so a slow answer cannot win
   composeSeed: '',
@@ -266,8 +270,15 @@ function applyState(next) {
 
   $('foldersSheet').classList.toggle('open', UI.overlay === 'folders' || UI.overlay === 'move');
   $('accountSheet').classList.toggle('open', UI.overlay === 'account');
+  $('devicesSheet').classList.toggle('open', UI.overlay === 'devices');
   $('moreSheet').classList.toggle('open', UI.overlay === 'more');
   $('composeSheet').classList.toggle('open', UI.overlay === 'compose');
+  /* Fetched on the transition rather than by whichever control opened the sheet,
+     because a forward gesture back into this state pushes no control at all and
+     the sheet would come up permanently empty. Entering is also the only moment
+     the list is worth re-reading: "last used" is a clock, and a list cached from
+     ten minutes ago is a list that quietly lies about it. */
+  if (UI.overlay === 'devices' && prev.overlay !== 'devices') loadDevices();
   // Closing the composer files what is in it. popstate cannot be cancelled and a
   // save cannot be awaited from there, so the close is allowed to happen and the
   // request follows it; a failure leaves the composer's own state in memory and
@@ -288,7 +299,11 @@ function applyState(next) {
   inert($('list'), phone && reading);
   $('reader').setAttribute('aria-hidden', (phone && !reading) ? 'true' : 'false');
 
-  const active = reading ? '' : (UI.overlay === 'move' ? 'folders' : (UI.overlay || 'inbox'));
+  // Devices is reached through the You sheet and is a screen inside it, so the
+  // You tab stays lit rather than the bar going blank on a state the person
+  // walked into from there. Move does the same for Folders.
+  const TAB_FOR = { move: 'folders', devices: 'you' };
+  const active = reading ? '' : (TAB_FOR[UI.overlay] || UI.overlay || 'inbox');
   const tabs = $('tabbar').querySelectorAll('.tab');
   for (let i = 0; i < tabs.length; i++) {
     if (tabs[i].dataset.tab === active) tabs[i].setAttribute('aria-current', 'page');
@@ -329,6 +344,7 @@ function syncFocus(prev) {
   else if (UI.overlay === 'search') focusSoon($('q'));
   else if (UI.overlay === 'folders' || UI.overlay === 'move') focusSoon($('sheetFolders').querySelector('.fold'));
   else if (UI.overlay === 'account') focusSoon($('shStudio'));
+  else if (UI.overlay === 'devices') focusSoon($('devicesSheet').querySelector('[data-close]'));
   else if (UI.overlay === 'more') focusSoon($('moreSheet').querySelector('.mrow'));
   else if (UI.pane === 'reader') focusSoon($('reader').querySelector('[data-act="back"]'));
   else if (wasLayer && FOCUS.saved && document.contains(FOCUS.saved)) {
@@ -448,6 +464,7 @@ document.addEventListener('click', function (e) {
   const retry = t.getAttribute('data-retry');
   if (retry === 'folders') { loadFolders(); return; }
   if (retry === 'messages') { loadMessages(true); return; }
+  if (retry === 'devices') { loadDevices(); return; }
   const what = t.getAttribute('data-do');
   if (what === 'refresh') refreshAll();
   else if (what === 'compose') openCompose();
@@ -1095,9 +1112,78 @@ function refreshAll() {
  * must never be able to pop it.
  */
 function openUnlock(reason) {
+  /* The single gate, and it is a refusal rather than a delay. While a device
+     restore is in flight the mailbox is about to open on its own, and a sheet
+     that appears and disappears half a second later is worse than one that never
+     appeared: it is on screen long enough to be read, focused and typed into,
+     and it teaches people that the app asks twice. Every caller goes through
+     here, so there is one place this can be true. */
+  if (S.restoring) return;
   if (reason) $('unlockWhy').textContent = reason;
   $('unlockSheet').classList.add('open');
   ($('uAddress').value ? $('uPassword') : $('uAddress')).focus();
+}
+
+/* The footer line has to follow the box above it. "Kept for this visit only" is
+   true with the box clear and a plain untruth with it ticked, and a promise the
+   screen breaks is worse than no promise. */
+function syncUnlockKeep() {
+  const keep = $('uRemember') && $('uRemember').checked;
+  $('unlockKeep').textContent = keep
+    ? 'Kept on this device until you sign it out under Devices'
+    : 'Kept for this visit only, never saved';
+}
+
+/* =========================================================================
+   Restoring the mailbox from the device
+
+   This is the whole of "the second password prompt has to stop appearing".
+
+   The mailbox credential does not come back with the page. It is restored on a
+   thread that outlives the redirect, exactly as MailboxAccess.openIfUnset already
+   describes for the login path, so /api/mail/status can honestly answer "not
+   open" for a few hundred milliseconds on a visit that is in fact about to
+   succeed. Prompting on that first answer is the defect: the sheet goes up, the
+   restore lands, and the sheet is taken away again from under somebody who has
+   already started typing.
+
+   So while the server says restoring, the list shows its skeleton, status is
+   asked again on a short cycle, and openUnlock is locked out rather than merely
+   deferred. If the restore does not land inside RESTORE_LIMIT_MS, or the server
+   stops claiming one, the prompt appears and that is the honest outcome.
+
+   A server that knows nothing of device sessions omits `restoring`, this returns
+   false on the first line, and the boot behaves exactly as it does today.
+   ========================================================================= */
+
+const RESTORE_EVERY_MS = 400;
+const RESTORE_LIMIT_MS = 8000;
+
+async function restoreFromDevice(status) {
+  if (!status || !status.restoring) return false;
+
+  S.restoring = true;
+  $('list').innerHTML = skeleton();
+  $('list').setAttribute('aria-busy', 'true');
+  const until = Date.now() + RESTORE_LIMIT_MS;
+  try {
+    while (Date.now() < until) {
+      await new Promise(done => setTimeout(done, RESTORE_EVERY_MS));
+      let next;
+      try {
+        next = await api('/api/mail/status');
+      } catch (e) {
+        return false;                  // a dead status call is not a restore
+      }
+      if (next.unlocked) return true;
+      if (!next.restoring) return false;
+    }
+    return false;
+  } finally {
+    // Cleared before anything can prompt, so the refusal in openUnlock lasts
+    // exactly as long as the restore and not one call longer.
+    S.restoring = false;
+  }
 }
 
 async function unlockMailbox() {
@@ -1109,7 +1195,17 @@ async function unlockMailbox() {
   btn.disabled = true;
   btn.textContent = 'Opening';
   try {
-    await post('/api/mail/unlock', { address: address, password: password });
+    /* The second half of the assumed device-session contract. remember=true asks
+       the server to seal this mailbox credential against the device token minted
+       at sign in, which is the only thing that stops this same sheet appearing
+       again tomorrow for somebody whose console and mailbox passwords differ. A
+       server that does not know the parameter ignores it and nothing here
+       changes. */
+    await post('/api/mail/unlock', {
+      address: address,
+      password: password,
+      remember: $('uRemember') && $('uRemember').checked ? 'true' : 'false'
+    });
     $('uPassword').value = '';
     $('unlockSheet').classList.remove('open');
     S.folderId = null;
@@ -1125,6 +1221,10 @@ async function unlockMailbox() {
   }
 }
 
+/* Part of the assumed device-session contract, and the part most likely to be
+   missed: POST /api/mail/lock has to drop the mailbox credential held against
+   this device's token as well as the one in the session. Without that, closing
+   the mailbox is undone by the next reload and the button is a lie. */
 async function lockMailbox() {
   try { await post('/api/mail/lock', {}); } catch (e) { /* closing can only fail into closed */ }
   S.folders = [];
@@ -1143,6 +1243,270 @@ async function lockMailbox() {
   $('tabUnread').hidden = true;
   openUnlock('Your mailbox is closed on this device. Enter your email password to open it again.');
 }
+
+/* =========================================================================
+   Devices
+
+   A sign-in that outlives the browser session is only defensible if the person
+   can see every device holding one and end any of them, so this screen is part
+   of that feature rather than a follow-up to it.
+
+   THE CONTRACT THIS CODES AGAINST HAS NOT LANDED YET. Nothing server side
+   answers these paths at the time of writing, so what follows is the assumed
+   shape, stated here so the agent that builds it has something exact to meet:
+
+     GET  /api/mail/devices
+          -> { enabled: true, devices: [ { id, name, platform, current,
+                                           createdAt, lastSeenAt, ip, mailbox } ] }
+     POST /api/mail/devices/revoke       id=<id>   -> { ok, self }
+     POST /api/mail/devices/revoke-all             -> { ok, signedOut, self }
+
+   `current` marks the device being used right now. `mailbox` is true when the
+   token can reopen the mailbox without the email password, which is the half a
+   person actually cares about and the half that costs them if the device is
+   lost. `self` in a revoke answer means the current device was among those
+   ended, and the browser belongs at /login.
+
+   /api/mail/** is the prefix SecurityConfig leaves open to a session bought with
+   a mailbox password alone, so that is the path tried first; /api/devices is
+   tried after it in case the console builds only that one, exactly the way
+   session.js discovers its own endpoint. Whichever answers is remembered.
+   ========================================================================= */
+
+const DEVICE_PATHS = ['/api/mail/devices', '/api/devices'];
+
+const DEV = {
+  base: null,        // the path that answered, discovered once
+  list: null,        // the last good answer, or null
+  loading: false,
+  error: null,       // a message when the last attempt failed
+  missing: false,    // nothing answered at all: the feature is not on this server
+  confirming: null,  // the id whose confirm line is open, or 'all', or null
+  busy: null         // the id currently being revoked, or 'all'
+};
+
+async function deviceCall(suffix, params) {
+  const paths = DEV.base ? [DEV.base] : DEVICE_PATHS;
+  for (let i = 0; i < paths.length; i++) {
+    const url = paths[i] + (suffix || '');
+    const res = params
+      ? await fetch(url, { method: 'POST', body: new URLSearchParams(params),
+                           headers: { 'X-XSRF-TOKEN': csrfToken() } })
+      : await fetch(url, { headers: { Accept: 'application/json' } });
+    if (res.status === 401) { location.href = '/login'; throw new Error('signed out'); }
+    // A 404 means this path is not the one; a 403 means this session is not
+    // allowed to ask it. Both are reasons to try the other path rather than to
+    // report a failure, and if neither answers the screen says so plainly.
+    if (res.status === 404 || res.status === 403) continue;
+    DEV.base = paths[i];
+    const payload = await readBody(res);
+    if (!res.ok) throw new Error((payload && payload.error) || 'That did not work.');
+    return payload || {};
+  }
+  const gone = new Error('Signed-in devices are not available on this server yet.');
+  gone.missing = true;
+  throw gone;
+}
+
+async function loadDevices() {
+  DEV.loading = true;
+  DEV.error = null;
+  DEV.missing = false;
+  DEV.confirming = null;
+  DEV.busy = null;
+  renderDevices();
+  try {
+    const data = await deviceCall('');
+    DEV.list = (data && data.devices) || [];
+  } catch (e) {
+    DEV.error = e.message;
+    DEV.missing = !!e.missing;
+  } finally {
+    DEV.loading = false;
+    renderDevices();
+  }
+}
+
+/* Two sprites and no third: there is no laptop symbol in the set, and inventing
+   one from a text character is exactly what section 6 forbids. A browser on
+   something that is not a phone is a browser, so it gets the globe. */
+function deviceSprite(d) {
+  const s = ((d.platform || '') + ' ' + (d.name || '')).toLowerCase();
+  return /iphone|ipad|android|phone|mobile|ios/.test(s) ? 'i-phone' : 'i-globe';
+}
+
+/* Deliberately coarse. "Last used 4 minutes ago" is what somebody needs to answer
+   "is that me, or is that the phone I left in the auto", and a precise timestamp
+   for something two weeks old only makes that harder to read at a glance. */
+function lastUsed(iso) {
+  const d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d)) return 'Last used at an unknown time';
+  const mins = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (mins < 2) return 'In use now';
+  if (mins < 60) return 'Last used ' + mins + ' minutes ago';
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return 'Last used ' + hours + (hours === 1 ? ' hour ago' : ' hours ago');
+  const days = Math.floor(hours / 24);
+  if (days < 30) return 'Last used ' + days + (days === 1 ? ' day ago' : ' days ago');
+  return 'Last used ' + fullWhen(iso);
+}
+
+function deviceRow(d) {
+  const current = !!d.current;
+  const confirming = DEV.confirming === d.id;
+  const busy = DEV.busy === d.id;
+  const name = d.name || d.platform || 'A signed-in browser';
+  const where = [d.platform && d.platform !== d.name ? d.platform : '', d.ip || '']
+    .filter(Boolean).join(' · ');
+
+  // The confirm copy is different for the device you are holding, because the
+  // consequence is different: everything else keeps working, this one does not.
+  const why = current
+    ? 'This signs you out here and returns you to the sign-in page.'
+    : (d.mailbox
+        ? 'That device will need both passwords again before it can read this mailbox.'
+        : 'That device will need to sign in again.');
+
+  return '<div class="drow' + (current ? ' is-current' : '') + (confirming ? ' confirming' : '')
+    + (busy ? ' going' : '') + '" data-drow="' + esc(d.id) + '">'
+    + icon(deviceSprite(d))
+    + '<span class="dmeta">'
+    + '<span class="dname"><span class="nm">' + esc(name) + '</span>'
+    + (current ? '<span class="pill ok">This device</span>' : '')
+    + '</span>'
+    // A device that signs in but still asks for the email password is a smaller
+    // exposure than one that does not, and that belongs on the same line as the
+    // clock rather than in a pill: a second pill competes with the device name
+    // for the width the name needs, and at 390px the name is what identifies it.
+    + '<span class="dwhen">' + esc(lastUsed(d.lastSeenAt))
+    + (d.mailbox === false ? ' · asks for the mail password' : '') + '</span>'
+    + (where ? '<span class="dwhere">' + esc(where) + '</span>' : '')
+    + '</span>'
+    + '<button class="dsign" type="button" data-dsign="' + esc(d.id) + '">Sign out</button>'
+    + '<span class="dconfirm">'
+    + '<span class="why">' + esc(why) + '</span>'
+    + '<button class="btn" type="button" data-dcancel>Keep it</button>'
+    + '<button class="btn dgo" type="button" data-dconfirm="' + esc(d.id) + '"' + (busy ? ' disabled' : '')
+    + '>' + (busy ? 'Signing out' : 'Sign out') + '</button>'
+    + '</span>'
+    + '</div>';
+}
+
+/* Skeleton rows at the real row geometry, so nothing jumps when the answer lands.
+   Section 9: a list gets skeletons, a spinner is only ever for a control. */
+function deviceSkeleton() {
+  let out = '<div class="dlist" aria-hidden="true">';
+  for (let i = 0; i < 3; i++) {
+    out += '<div class="drow"><span class="sk sk-av" style="width:18px;height:18px"></span>'
+      + '<span class="dmeta"><span class="sk sk-1" style="width:56%;margin-bottom:6px"></span>'
+      + '<span class="sk sk-3" style="width:38%"></span></span>'
+      + '<span class="sk sk-2" style="width:52px"></span></div>';
+  }
+  return out + '</div>';
+}
+
+function renderDevices() {
+  const body = $('devicesBody');
+  if (!body) return;
+
+  if (DEV.loading && !DEV.list) {
+    body.setAttribute('aria-busy', 'true');
+    body.innerHTML = deviceSkeleton();
+    return;
+  }
+  body.setAttribute('aria-busy', 'false');
+
+  if (DEV.error && !DEV.list) {
+    // The feature simply not being on this server is not a fault and must not be
+    // dressed as one: no Retry, because retrying cannot make it exist.
+    body.innerHTML = DEV.missing
+      ? emptyState('i-shield', DEV.error)
+      : errState(DEV.error, 'devices');
+    return;
+  }
+
+  const list = DEV.list || [];
+  if (!list.length) {
+    body.innerHTML = emptyState('i-shield',
+      'No device is kept signed in. Every visit will ask for your password.');
+    return;
+  }
+
+  const others = list.filter(d => !d.current).length;
+  const allConfirming = DEV.confirming === 'all';
+  const allBusy = DEV.busy === 'all';
+
+  body.innerHTML =
+    '<p class="dnote">These devices stay signed in without asking again. Sign out '
+    + 'anything you do not recognise, or a device you no longer have.</p>'
+    + '<div class="dlist">' + list.map(deviceRow).join('') + '</div>'
+    + (others
+        ? '<div class="dall">'
+          + (allConfirming
+              ? '<p class="why">' + others + (others === 1 ? ' other device' : ' other devices')
+                + ' will need to sign in again. This device stays signed in.</p>'
+                + '<button class="btn dgo" type="button" data-dallconfirm' + (allBusy ? ' disabled' : '')
+                + '>' + (allBusy ? 'Signing out' : 'Yes, sign them out') + '</button>'
+                + '<button class="btn" type="button" data-dcancel>Cancel</button>'
+              : '<p class="why">Lost a phone, or signed in on a computer you do not own?</p>'
+                + '<button class="btn" type="button" data-dall>Sign out '
+                + others + (others === 1 ? ' other device' : ' other devices') + '</button>')
+          + '</div>'
+        : '');
+}
+
+async function revokeDevice(id) {
+  DEV.busy = id;
+  renderDevices();
+  try {
+    const r = await deviceCall('/revoke', { id: id });
+    // Ending the session you are sitting in means the next request is a 401
+    // anyway. Going there deliberately is the difference between an app that
+    // did what you asked and one that appears to hang.
+    if (r && r.self) { location.href = '/login?loggedOut'; return; }
+    toast('That device was signed out.');
+    await loadDevices();
+  } catch (e) {
+    DEV.busy = null;
+    DEV.confirming = null;
+    renderDevices();
+    toast(e.message, true);
+  }
+}
+
+async function revokeOtherDevices() {
+  DEV.busy = 'all';
+  renderDevices();
+  try {
+    const r = await deviceCall('/revoke-all', {});
+    if (r && r.self) { location.href = '/login?loggedOut'; return; }
+    const n = r && typeof r.signedOut === 'number' ? r.signedOut : 0;
+    toast(n === 1 ? 'One device was signed out.' : n + ' devices were signed out.');
+    await loadDevices();
+  } catch (e) {
+    DEV.busy = null;
+    DEV.confirming = null;
+    renderDevices();
+    toast(e.message, true);
+  }
+}
+
+/* One delegated listener on the sheet, bound once. The body is replaced on every
+   render, so a listener per control would leak one set per render and the sprite
+   inside a button is what e.target reports, which is why every branch matches
+   with closest(). */
+$('devicesSheet').addEventListener('click', e => {
+  const t = e.target.closest
+    && e.target.closest('[data-dsign],[data-dconfirm],[data-dcancel],[data-dall],[data-dallconfirm]');
+  if (!t) return;
+  if (t.hasAttribute('data-dcancel')) { DEV.confirming = null; renderDevices(); return; }
+  if (t.hasAttribute('data-dall')) { DEV.confirming = 'all'; renderDevices(); return; }
+  if (t.hasAttribute('data-dallconfirm')) { revokeOtherDevices(); return; }
+  const sign = t.getAttribute('data-dsign');
+  if (sign) { DEV.confirming = sign; renderDevices(); return; }
+  const confirmed = t.getAttribute('data-dconfirm');
+  if (confirmed) revokeDevice(confirmed);
+});
 
 /* ---------- compose ---------- */
 
@@ -2956,7 +3320,7 @@ $('tabbar').addEventListener('click', e => {
   else if (tab === 'you') goOverlay('account');
 });
 
-['foldersSheet', 'accountSheet', 'moreSheet', 'composeSheet'].forEach(id => {
+['foldersSheet', 'accountSheet', 'devicesSheet', 'moreSheet', 'composeSheet'].forEach(id => {
   const el = $(id);
   el.addEventListener('click', e => {
     if (e.target === el || (e.target.closest && e.target.closest('[data-close]'))) history.back();
@@ -2981,12 +3345,20 @@ $('pbAccount').addEventListener('click', () => goOverlay('account'));
 $('btnCompose').addEventListener('click', () => openCompose());
 $('railCompose').addEventListener('click', () => openCompose());
 $('railLock').addEventListener('click', lockMailbox);
+/* Both entry points to the devices screen, wired in the same change as the sheet
+   itself. goOverlay replaces rather than stacks, so Back from Devices lands on
+   the list and not back inside the You sheet, which is how every other overlay
+   on this page already behaves. */
+$('railDevices').addEventListener('click', () => goOverlay('devices'));
+$('shDevices').addEventListener('click', () => goOverlay('devices'));
 $('shLock').addEventListener('click', () => popThen(lockMailbox));
 $('btnCancel').addEventListener('click', () => history.back());
 $('btnCancelTop').addEventListener('click', () => history.back());
 $('btnSend').addEventListener('click', sendMessage);
 $('btnUnlock').addEventListener('click', unlockMailbox);
 $('uPassword').addEventListener('keydown', e => { if (e.key === 'Enter') unlockMailbox(); });
+$('uRemember').addEventListener('change', syncUnlockKeep);
+syncUnlockKeep();
 
 /* ---------- attach wiring ---------- */
 
@@ -3137,9 +3509,20 @@ if (!can('MAIL_SEND')) {
 
   if (!status.v.unlocked) {
     await foldersAsk;                       // settled, and deliberately discarded
+    $('uAddress').value = status.v.suggested || ME.email || '';
+
+    /* The one branch that decides whether anybody is asked for a password today.
+       The folders answer above is already a 409 and is thrown away either way,
+       so a successful restore refetches rather than reusing it. */
+    if (await restoreFromDevice(status.v)) {
+      S.folderId = null;
+      await loadFolders();
+      if (wantsCompose && can('MAIL_SEND')) openCompose();
+      return;
+    }
+
     $('list').innerHTML = emptyState('i-lock', 'Your mailbox is not open on this device yet.');
     $('list').setAttribute('aria-busy', 'false');
-    $('uAddress').value = status.v.suggested || ME.email || '';
     openUnlock();
     return;
   }

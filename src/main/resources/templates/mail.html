@@ -557,6 +557,98 @@
            with auto margins, and an inline margin-top:0 outranks any of them. */
         #unlockWhy{margin:0 0 14px;line-height:1.55}
 
+        /* ============ the check row ============
+           One shape, used by the unlock sheet's "remember this device" and by the
+           devices screen. The input is the 44x44 hit area and is invisible; the
+           20px box beside it is what anyone sees. Padding the hit area rather
+           than growing the glyph is section 8, and a checkbox drawn at 44px
+           beside 12px type would read as a button. */
+        .check{position:relative;display:flex;gap:12px;align-items:flex-start;
+               padding:10px 12px 10px 10px;border:1px solid var(--border);
+               border-radius:var(--radius-sm);background:var(--panel-2);cursor:pointer;
+               -webkit-tap-highlight-color:transparent}
+        .check:hover{border-color:var(--border-strong)}
+        .check input{position:absolute;left:0;top:0;width:44px;height:44px;margin:0;
+                     opacity:0;cursor:pointer}
+        .cbox{flex:none;width:20px;height:20px;margin-top:1px;border-radius:5px;
+              border:1px solid var(--border-strong);background:var(--field-bg);
+              display:grid;place-items:center;color:#fff;
+              transition:background var(--t-fast),border-color var(--t-fast)}
+        .cbox .ic{width:13px;height:13px;stroke-width:2.6;opacity:0}
+        .check input:checked ~ .cbox{background:var(--primary);border-color:var(--primary)}
+        .check input:checked ~ .cbox .ic{opacity:1}
+        /* An invisible input cannot show a ring, so the ring moves to the box it
+           drives. It is never simply removed. */
+        .check input:focus-visible ~ .cbox{outline:2px solid var(--primary);outline-offset:2px}
+        .check-t{min-width:0}
+        .check-t b{display:block;font-size:13px;font-weight:600;color:var(--text)}
+        .check-t span{display:block;margin-top:3px;font-size:12px;line-height:1.5;color:var(--text-mute)}
+
+        /* ============ the devices screen ============
+           What makes a token that outlives the browser session defensible rather
+           than reckless: every device that can open this mailbox without a
+           password, when each was last used, and a way to end any of them. The
+           row is NOT a button. Its only control is the sign-out on the right, so
+           there is no ambiguity about what pressing the row does, and no nested
+           button, which is invalid inside one. */
+        .dlist{display:flex;flex-direction:column;gap:8px}
+        .drow{display:grid;grid-template-columns:auto 1fr auto;column-gap:12px;align-items:center;
+              padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);
+              background:var(--panel-2)}
+        .drow > .ic{color:var(--text-mute);align-self:start;margin-top:3px}
+        .dmeta{min-width:0}
+        .dname{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600;
+               color:var(--text);line-height:18px}
+        .dname .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        /* --text-dim then --text-mute, and deliberately not --text-faint on the
+           third line. Measured: --text-faint reads 4.05:1 on --panel-3, which is
+           the ground .drow.is-current paints, against a 4.5:1 floor for body text.
+           The hierarchy is carried by two steps rather than three. */
+        .dwhen{display:block;margin-top:2px;font-size:12px;line-height:1.45;color:var(--text-dim);
+               font-variant-numeric:tabular-nums}
+        .dwhere{display:block;margin-top:1px;font-size:11.5px;line-height:1.4;color:var(--text-mute);
+                overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        /* Deliberately not red. Pressing this only opens the confirm below it, so
+           painting it as the destructive act would put four danger-coloured
+           controls on one 390px screen and spend the whole palette on a step that
+           destroys nothing. The red is on the confirm, where the destruction is. */
+        .dsign{min-width:44px;min-height:44px;padding:0 12px;border-radius:var(--radius-sm);
+               border:1px solid var(--border-strong);background:none;color:var(--text-dim);
+               font-size:12.5px;font-weight:600;cursor:pointer;
+               -webkit-tap-highlight-color:transparent;
+               transition:background var(--t-fast),border-color var(--t-fast),color var(--t-fast)}
+        .dsign:hover{background:var(--panel-3);color:var(--text)}
+        .dsign:active{background:var(--panel-3)}
+        .dsign[disabled]{opacity:.45;cursor:not-allowed}
+        .dgo,.dgo:hover{color:var(--danger-fg);border-color:rgba(224,72,60,.45)}
+        /* Section 8: every destructive action confirms. The confirm is a second
+           line inside the row rather than two controls squeezed beside the name,
+           because at 390px a name, a timestamp and two 44px buttons on one line
+           cannot all be legible and the name is what identifies the device. */
+        .dconfirm{grid-column:1/-1;display:none;gap:8px;margin-top:10px;
+                  padding-top:10px;border-top:1px solid var(--border)}
+        .drow.confirming .dconfirm{display:flex}
+        .drow.confirming .dsign{display:none}
+        .dconfirm .btn{flex:1 1 auto;min-height:44px}
+        .dconfirm .why{flex:1 1 100%;margin:0 0 2px;font-size:12px;line-height:1.5;color:var(--text-mute)}
+        .drow.is-current{border-color:var(--border-strong);background:var(--panel-3)}
+        .drow.going{opacity:.5}
+        /* Sign out everything else. A full-width row under the list rather than a
+           control in the header, so it can never be the thing a thumb reaches
+           first on the way to closing the sheet. */
+        .dall{margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+        .dall .btn{width:100%;min-height:44px}
+        .dall .why{margin:0 0 10px;font-size:12px;line-height:1.5;color:var(--text-mute)}
+        .dnote{margin:0 0 14px;font-size:12.5px;line-height:1.55;color:var(--text-mute)}
+        @media(min-width:900px){
+            /* Narrower than the 680px every other sheet uses. A device row is a
+               name and a timestamp; stretched to 680 its sign-out control ends up
+               a third of a screen away from the device it belongs to. Scoped to
+               min-width so it cannot outrank the phone rule, which sets width on
+               .sheet and would lose to an id selector written outside a query. */
+            #devicesSheet .sheet{width:min(520px,100%)}
+        }
+
         /* ============ attachments on the compose sheet ============
            The list is the control. A count in a label would leave the sender with
            no way to see what is actually going out or to take one file back off,
@@ -1170,8 +1262,13 @@
         }
 
         @media(prefers-reduced-motion:reduce){
-            .reader,.tabbar,.backdrop,.sheet,.bsheet .sheet,.fab,.msg,.btn,.pib,.tab,.mrow,.fold,.nav,
-            .rbar-who{
+            /* .backdrop.open is listed as well as .backdrop, and it is not
+               redundant: the open state carries its own transition at one class
+               more specificity, so listing only .backdrop left every sheet still
+               fading in over 200ms under reduce. Measured at 390px, where it
+               reported "0.2s, 0s" against the 0s section 7 asks for. */
+            .reader,.tabbar,.backdrop,.backdrop.open,.sheet,.bsheet .sheet,.fab,.msg,.btn,.pib,
+            .tab,.mrow,.fold,.nav,.drow,.dsign,.cbox,.rbar-who{
                 transition:none}
             .sk,.spin,.toast,.pib.busy .ic{animation:none}
             .sk{background:var(--panel-3)}
@@ -1212,6 +1309,11 @@
                  how someone gets back to it without clearing site data. -->
             <button class="nav" type="button" data-jm-install>
                 <svg class="ic" aria-hidden="true"><use href="#i-install"/></svg><span>Install app</span></button>
+            <!-- The devices screen is not phone-only chrome. Somebody signs a lost
+                 phone out from whatever they are sitting at, and that is usually
+                 the laptop, so the row exists on both surfaces. -->
+            <button class="nav" type="button" id="railDevices">
+                <svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg><span>Devices</span></button>
             <button class="nav" type="button" id="railLock">
                 <svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg><span>Close mailbox</span></button>
             <a class="nav" href="/logout">
@@ -1379,11 +1481,32 @@
                 <svg class="ic ic-sm chev" aria-hidden="true"><use href="#i-next"/></svg></a>
             <button class="mrow" type="button" data-jm-install>
                 <svg class="ic" aria-hidden="true"><use href="#i-install"/></svg><span>Install app</span></button>
+            <!-- "Stay signed in on this device" is only defensible if this row
+                 exists, so it is not optional and it is not buried in settings. -->
+            <button class="mrow" type="button" id="shDevices">
+                <svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg><span>Devices</span>
+                <svg class="ic ic-sm chev" aria-hidden="true"><use href="#i-next"/></svg></button>
             <button class="mrow" type="button" id="shLock">
                 <svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg><span>Close mailbox</span></button>
             <a class="mrow danger" href="/logout">
                 <svg class="ic" aria-hidden="true"><use href="#i-logout"/></svg><span>Sign out</span></a>
         </div>
+    </div>
+</div>
+
+<!-- Signed-in devices. The body is rendered by renderDevices in mail.js and owes
+     the three states of section 9: skeleton rows while it loads, a designed empty
+     state, and an error that says what failed with a Retry that really retries.
+     Opened from the account sheet on a phone and from the rail on a laptop, both
+     wired in mail.js in this same change. -->
+<div class="backdrop bsheet" id="devicesSheet">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="devicesTitle">
+        <span class="grab" aria-hidden="true"></span>
+        <div class="sheet-h">
+            <h3 id="devicesTitle">Devices</h3><span class="spacer"></span>
+            <button class="pib" type="button" data-close aria-label="Close">
+                <svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+        <div class="sheet-b" id="devicesBody"></div>
     </div>
 </div>
 
@@ -1576,11 +1699,31 @@
                 <input id="uAddress" autocomplete="username" inputmode="email" placeholder="you@jarurat.care"></div>
             <div class="field"><label for="uPassword">Email password</label>
                 <input id="uPassword" type="password" autocomplete="current-password"></div>
+            <!--
+              The other half of "stay signed in". The console password and the email
+              password are two different secrets against two different stores, so
+              remembering only the first still asks for the second every day. This
+              box is what makes the whole round trip disappear, and it is checked by
+              default for the same reason the sign-in one is: nothing here can tell a
+              personal phone from a shared laptop, and the sentence says what the
+              choice costs rather than leaving it to be discovered.
+            -->
+            <label class="check" for="uRemember">
+                <input type="checkbox" id="uRemember" name="remember" value="true" checked>
+                <span class="cbox" aria-hidden="true">
+                    <svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></span>
+                <span class="check-t">
+                    <b>Keep this mailbox open on this device</b>
+                    <span>Otherwise this asks again roughly once a day. Anyone holding this
+                        device can then read and send your mail. You can end that from
+                        Devices, in the You sheet.</span>
+                </span>
+            </label>
         </div>
         <div class="sheet-f">
             <button class="btn pri" type="button" id="btnUnlock">Open mailbox</button>
             <span class="spacer"></span>
-            <span class="muted hint">Kept for this visit only, never saved</span>
+            <span class="muted hint" id="unlockKeep">Kept for this visit only, never saved</span>
         </div>
     </div>
 </div>
@@ -1610,7 +1753,7 @@
 <th:block th:replace="~{fragments/shortcuts :: markup}"></th:block>
 <th:block th:replace="~{fragments/session :: surface}"></th:block>
 
-<script src="/js/mail.js?v=compose1"></script>
+<script src="/js/mail.js?v=device1"></script>
 <!-- After mail.js, because each of these reads the state it publishes. The bulk,
      shortcut and session scripts are NOT listed here: their own fragments carry
      the script tags, and naming them again loaded each one twice. -->

@@ -1,5 +1,9 @@
 package com.jarurat.mailer.security;
 
+import com.jarurat.mailer.device.DeviceSettings;
+import com.jarurat.mailer.device.DeviceTokenService;
+import com.jarurat.mailer.device.PersistentDeviceFilter;
+import com.jarurat.mailer.mail.MailCredentialStore;
 import com.jarurat.mailer.repositories.ApiKeyRepository;
 import com.jarurat.mailer.webmail.MailboxAccess;
 import org.springframework.beans.factory.ObjectProvider;
@@ -87,8 +91,17 @@ public class SecurityConfig {
      * redirect to "/mail" for these sessions. Denying it here would swap that redirect
      * for a 403 on the one link the console rail and the phone account sheet both
      * offer.
+     *
+     * "/api/devices/**" is here for a reason worth spelling out. A device token is
+     * minted almost entirely for mail-only sessions on phones, so the person who most
+     * needs to see their devices and sign a lost one out is exactly the person with no
+     * app_user row and no console permission. Leaving it to the console rule below
+     * would answer them 403 on the only control that withdraws a credential lasting
+     * months. It exposes nothing else: DeviceApi resolves the mailbox from the session
+     * pin rather than from a parameter, and DeviceTokenService checks the ownership of
+     * a family again before it deletes one.
      */
-    static final String[] MAIL_ONLY_PATHS = { "/mail", "/api/mail/**", "/app", "/logout" };
+    static final String[] MAIL_ONLY_PATHS = { "/mail", "/api/mail/**", "/api/devices/**", "/app", "/logout" };
 
     /**
      * Every permission that is not one of the two a mailbox password buys. Derived
@@ -291,7 +304,15 @@ public class SecurityConfig {
                                             AuthenticationManager authenticationManager,
                                             LoginLandingHandler loginLandingHandler,
                                             LoginRateLimiter loginRateLimiter,
-                                            MailboxAccess mailboxes) throws Exception {
+                                            MailboxAccess mailboxes,
+                                            DeviceSettings deviceSettings,
+                                            DeviceTokenService deviceTokens,
+                                            MailCredentialStore mailCredentials) throws Exception {
+        // Constructed here rather than annotated, because Spring Boot also registers
+        // every Filter bean with the servlet container: an @Component on it would put
+        // it in front of the stateless API chain as well and run it twice on this one.
+        PersistentDeviceFilter persistentDevice =
+                new PersistentDeviceFilter(deviceSettings, deviceTokens, mailboxes, mailCredentials);
         // The default XOR handler expects a BREACH-encoded value, which a fetch()
         // reading the raw cookie cannot produce. The plain handler matches what
         // the browser actually sends back.
@@ -321,6 +342,15 @@ public class SecurityConfig {
                 .addFilterBefore(
                         new LoginRateLimitFilter(loginRateLimiter, LOGIN_PATH, USERNAME_PARAMETER),
                         UsernamePasswordAuthenticationFilter.class)
+                // After SecurityContextHolderFilter, which is where the session is read,
+                // and before the authorization rules, which is where the absence of a
+                // session turns into a redirect to the login page. That is the whole
+                // window this filter has: it must see that there is no authentication
+                // and put one back before anything acts on the emptiness. Registering it
+                // any earlier would run it before the session had been consulted at all,
+                // and it would rotate a device token on every request of an already
+                // signed-in phone.
+                .addFilterBefore(persistentDevice, UsernamePasswordAuthenticationFilter.class)
                 .csrf(csrf -> csrf
                         .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
                         .csrfTokenRequestHandler(csrfHandler)
@@ -372,6 +402,14 @@ public class SecurityConfig {
                         // has to happen first.
                         .addLogoutHandler((request, response, authentication) ->
                                 mailboxes.close(authentication, request.getSession(false)))
+                        // And the same promise about the copy at rest. Sign out has to
+                        // revoke the device token as well, or the button would drop the
+                        // password from the heap and leave a cookie on the phone that
+                        // silently signs it straight back in on the next request. The
+                        // row is deleted rather than expired, which destroys the only
+                        // copy of the sealed mailbox password with it.
+                        .addLogoutHandler((request, response, authentication) ->
+                                deviceTokens.forget(request, response))
                         // Sign out is a plain link in the rail, in the phone account
                         // sheet and in the console, which the UI specification pins
                         // down as markup. LogoutConfigurer answers a CSRF-enabled chain

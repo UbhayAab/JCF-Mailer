@@ -4,7 +4,10 @@ import com.jarurat.mailer.mail.JmapClient;
 import com.jarurat.mailer.mail.MailException;
 import com.jarurat.mailer.mail.MailFolder;
 import com.jarurat.mailer.mail.MailService;
+import com.jarurat.mailer.push.NotificationRules;
+import com.jarurat.mailer.push.PushService;
 import jakarta.servlet.http.HttpSession;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
@@ -18,8 +21,11 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -50,6 +56,23 @@ import java.util.concurrent.ConcurrentHashMap;
  * There is no way to poll a mailbox other than the one pinned to this browser
  * session, for the same reason no other endpoint here takes a mailbox parameter.
  * See MailboxAccess.
+ *
+ * WHY THE LANE IS DECIDED HERE AND NOT AT THE MAIL SERVER
+ * ------------------------------------------------------------------------------
+ * A notification lane is a property of the person's rules, not of the message, so
+ * the only two places that can work it out are this process and the browser. It is
+ * not the browser: deciding there would mean shipping somebody's VIP list to every
+ * device on every poll, and PushNotification already writes down why that is not
+ * acceptable. The mail server cannot help either, not yet. The box runs Stalwart
+ * 0.16.17 and the emailPush extension that would let a lane ride along with a
+ * change notification arrived in 0.16.19, so an upgrade is a real answer and it is
+ * not today's answer. This path has the message and the mailbox in one place right
+ * now, which is enough to make quiet hours and direct-to-me work today rather than
+ * after somebody schedules a mail server upgrade.
+ *
+ * The rules are evaluated for the newest message only. Nothing else in the answer
+ * is a candidate for a notification, so evaluating anything else would be work the
+ * client would throw away, forty-five seconds at a time.
  */
 @RestController
 @RequestMapping("/api/mail")
@@ -60,8 +83,18 @@ public class MailPollApi {
     /** Four, not the seven /api/mail/folders asks for: nothing here draws a folder list. */
     private static final List<String> FOLDER_PROPS = List.of("id", "role", "totalEmails", "unreadEmails");
 
-    /** Everything one line of a notification needs, and nothing that costs a body fetch. */
-    private static final List<String> NEWEST_PROPS = List.of("id", "receivedAt", "subject", "from", "keywords");
+    /**
+     * Everything one line of a notification needs, and nothing that costs a body fetch.
+     *
+     * to and cc are here for the rules rather than for the answer, and neither is ever
+     * sent to the browser. They are what separates a message addressed to this mailbox
+     * from a Cc to fifty people, which is the single distinction that decides whether
+     * somebody leaves notifications switched on. Both are address lists on a message
+     * that has already been fetched, so they cost bytes inside a round trip that was
+     * happening anyway rather than another round trip.
+     */
+    private static final List<String> NEWEST_PROPS =
+            List.of("id", "receivedAt", "subject", "from", "to", "cc", "keywords");
 
     /** A notification body is one line on a phone; the rest is bytes on the wire every 45 seconds. */
     private static final int SUBJECT_CLIP = 140;
@@ -85,6 +118,20 @@ public class MailPollApi {
      * exactly one call.
      */
     private final Map<String, String> inboxIds = new ConcurrentHashMap<>();
+
+    /**
+     * Where the notification rules are read from, and why it is not a constructor
+     * argument.
+     *
+     * Injected on the field and optional on purpose. A poll must answer with an unread
+     * count and a newest message whether or not anything about notifications is wired
+     * up, so the rules being unreachable has to degrade to an unknown lane rather than
+     * to a 502 on the one endpoint a tab calls all day. PushService owns the lookup
+     * because the rules are its half of the application and one loader with the reason
+     * attached is better than the same four lines in two packages.
+     */
+    @Autowired(required = false)
+    private PushService push;
 
     public MailPollApi(MailboxAccess mailbox, MailService mail, JmapClient jmap) {
         this.mailbox = mailbox;
@@ -194,12 +241,89 @@ public class MailPollApi {
             return null;
         }
 
+        JsonNode fetched = jmap.response(responses, "Email/get", "g0");
+        Map<String, Object> row = newest(fetched);
+        // The lane is written onto the row rather than alongside it, because it is a
+        // fact about that one message and a client holding the two apart would be one
+        // refactor away from announcing this message in the lane of the last one.
+        if (row != null) applyLane(user, fetched.path("list").path(0), row);
+
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("mailbox", user);
         out.put("folderId", inboxId);
         out.put("unread", inbox.path("unreadEmails").asInt(0));
         out.put("total", inbox.path("totalEmails").asInt(0));
-        out.put("newest", newest(jmap.response(responses, "Email/get", "g0")));
+        out.put("newest", row);
+        return out;
+    }
+
+    /**
+     * Runs the notification rules over the newest message and writes the answer onto it.
+     *
+     * Three fields, and they are the whole contract with the client: lane is A, B or C
+     * exactly as NotificationRules.Lane spells them and as sw.js already reads them,
+     * reason is why, and quiet says whether an interruption was quieted by the clock
+     * rather than by a rule. reason is worth its handful of bytes because it is the only
+     * way a person asking "why did that not make a sound" can be answered honestly, and
+     * because a client that has to guess the reason will guess it wrong.
+     *
+     * WHAT THIS PATH CANNOT KNOW, SAID OUT LOUD
+     * ------------------------------------------------------------------------------
+     * A lane that cannot be determined is reported as null, never as A. A default that
+     * always interrupts is exactly how people switch notifications off for good, and it
+     * is what this endpoint did before there was a lane here at all.
+     *
+     * Two inputs are also weaker here than they will be, and both are wrong in the
+     * quiet direction rather than the loud one:
+     *
+     *   - watchedThread is false. Whether this mailbox has already written into the
+     *     thread needs the thread's messages and a fourteen day window, which is a
+     *     second JMAP query per poll on the one endpoint whose budget is one round trip.
+     *     The cost of being wrong is that a reply to a thread you are in arrives in lane
+     *     B instead of lane A, which is a message shown in full and silently.
+     *   - automated and fromList are false, so a robot is caught by its address through
+     *     MailboxSettings.looksAutomated but not by List-Unsubscribe, Precedence or
+     *     Auto-Submitted. Those live in headers, and reading a header through JMAP means
+     *     asking Email/get for header:List-Unsubscribe:asText and its two neighbours. RFC
+     *     8621 requires a server to answer that, this one has never been asked for it,
+     *     and a property Stalwart 0.16.17 refuses would fail the whole Email/get and take
+     *     the poll down with it. That is a change to make against the real box with the
+     *     answer in front of you, not one to guess at from here.
+     */
+    private void applyLane(String user, JsonNode message, Map<String, Object> row) {
+        NotificationRules rules = push == null ? null : push.rulesFor(user);
+        if (rules == null) {
+            row.put("lane", null);
+            row.put("reason", "unknown");
+            row.put("quiet", false);
+            return;
+        }
+
+        // The folder is the inbox and not a guess: Email/query filtered on the inbox id
+        // and the Mailbox/get in the same request confirmed that id is still the inbox.
+        NotificationRules.Arrival arrival = new NotificationRules.Arrival(
+                JmapClient.text(message.path("from").path(0), "email"),
+                addresses(message.path("to")),
+                addresses(message.path("cc")),
+                "inbox",
+                Boolean.TRUE.equals(row.get("seen")),
+                false,
+                false,
+                false);
+
+        NotificationRules.Decision decision = rules.decide(arrival, Instant.now());
+        row.put("lane", decision.lane().code());
+        row.put("reason", decision.reason().name().toLowerCase(Locale.ROOT));
+        row.put("quiet", decision.quietMuted());
+    }
+
+    /** The email addresses out of a JMAP address list, which is all a rule looks at. */
+    private static List<String> addresses(JsonNode list) {
+        List<String> out = new ArrayList<>();
+        for (JsonNode entry : list) {
+            String email = JmapClient.text(entry, "email");
+            if (email != null && !email.isBlank()) out.add(email);
+        }
         return out;
     }
 
