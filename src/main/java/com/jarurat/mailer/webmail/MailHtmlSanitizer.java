@@ -737,6 +737,7 @@ public final class MailHtmlSanitizer {
             if (darkGround && !bringsOwnGround && ("color".equals(prop) || "border-color".equals(prop))) {
                 cleaned = liftForDarkGround(cleaned);
             }
+            if ("font-size".equals(prop)) cleaned = atLeastReadable(cleaned);
             if (out.length() > 0) out.append(';');
             out.append(cleaned);
         }
@@ -876,20 +877,90 @@ public final class MailHtmlSanitizer {
      * to blue and an average calls a saturated blue "light" when it reads as dark.
      */
     private static String lift(int r, int g, int b) {
+        float[] hsb = java.awt.Color.RGBtoHSB(r, g, b, null);
+
+        // A NEAR NEUTRAL GREY IS NOT A COLOUR CHOICE, it is the sender reaching for
+        // "body text", and it becomes the reader's own body colour.
+        //
+        // Passing contrast is not the same as looking right, and treating them as the
+        // same produced a real complaint. The rule below only fired under 4.5:1, so a
+        // sender's #999999 cleared the floor and was left exactly as written. It then
+        // sat in the same message as text with no colour at all, which inherits our
+        // #ededed. The result was a letter whose actual content was dim grey while the
+        // legal boilerplate underneath it, which sets no colour, was bright white: the
+        // least important text on screen was the most prominent, and every message
+        // looked slightly different from the last depending on which grey its author
+        // happened to pick.
+        //
+        // Saturation is what separates a deliberate colour from a shade of grey. Below
+        // this threshold there is no hue worth preserving, so nothing is lost by
+        // snapping it, and consistency is gained across every message in the mailbox.
+        if (hsb[1] <= 0.12f) return READER_TEXT;
+
         double lum = (0.2126 * srgb(r) + 0.7152 * srgb(g) + 0.0722 * srgb(b));
-        // Contrast against the #202020 reading surface. Anything already clearing the
-        // 4.5:1 body-text floor is the sender writing for dark, and is left alone.
+        // Contrast against the #202020 reading surface. A COLOUR that already clears the
+        // floor is the sender writing for dark, and is left alone.
         double groundLum = 0.0144;
         double ratio = (Math.max(lum, groundLum) + 0.05) / (Math.min(lum, groundLum) + 0.05);
         if (lum > groundLum && ratio >= 4.5) return css(r, g, b);
 
-        float[] hsb = java.awt.Color.RGBtoHSB(r, g, b, null);
         // Hue is kept, saturation is eased back so a lifted colour does not glow, and
         // brightness lands in a band that clears the floor without being pure white.
         float brightness = 0.86f - 0.12f * hsb[1];
         float saturation = Math.min(hsb[1], 0.55f);
         java.awt.Color lifted = java.awt.Color.getHSBColor(hsb[0], saturation, brightness);
         return css(lifted.getRed(), lifted.getGreen(), lifted.getBlue());
+    }
+
+    /** The reader's own body colour, matching --jct in the dark wrapper. */
+    private static final String READER_TEXT = "#ededed";
+
+    /** Below this a message is not small, it is unreadable on a phone held at arm's length. */
+    private static final double MIN_FONT_PX = 14.0;
+
+    private static final Pattern FONT_SIZE_VALUE =
+            Pattern.compile("(-?\\d*\\.?\\d+)\\s*(px|pt|em|rem|%)", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Raises a font size the sender chose to something a person can actually read.
+     *
+     * Mail is full of small type and almost none of it is a design decision. A quoted
+     * reply chain is emitted at 10 or 11 pixels by most clients, a signature block is
+     * routinely 9, and Outlook writes sizes in points against assumptions about a
+     * desktop screen from twenty years ago. On a phone that is not small text, it is a
+     * grey smear, and it is why one message in this mailbox reads comfortably and the
+     * next one, which is a reply to it, does not.
+     *
+     * Only the floor moves. Anything at or above it is the sender's decision and is
+     * left exactly as written, so headings, large type and deliberate emphasis all
+     * survive. Relative units are left alone entirely: em, rem and percentage compound
+     * against a parent this method cannot see, so "0.9em" may well be larger than the
+     * floor already, and rewriting it to a pixel value would flatten a whole nested
+     * structure to one size.
+     */
+    static String atLeastReadable(String decl) {
+        int colon = decl.indexOf(':');
+        if (colon <= 0) return decl;
+        String value = decl.substring(colon + 1);
+
+        Matcher m = FONT_SIZE_VALUE.matcher(value);
+        if (!m.find()) return decl;
+
+        String unit = m.group(2).toLowerCase(Locale.ROOT);
+        if (!"px".equals(unit) && !"pt".equals(unit)) return decl;
+
+        double size;
+        try {
+            size = Double.parseDouble(m.group(1));
+        } catch (NumberFormatException e) {
+            return decl;
+        }
+        // A point is four thirds of a CSS pixel, which is the whole reason Outlook's
+        // "11pt" and a browser's "11px" are not the same text.
+        double px = "pt".equals(unit) ? size * 4.0 / 3.0 : size;
+        if (px >= MIN_FONT_PX) return decl;
+
+        return decl.substring(0, colon + 1) + " " + (int) Math.round(MIN_FONT_PX) + "px";
     }
 
     private static double srgb(int c) {
@@ -1148,7 +1219,7 @@ public final class MailHtmlSanitizer {
                 + "html{background:" + (dark ? "#202020" : "#ffffff") + "}"
                 + "body{background:" + (dark ? "#202020" : "#ffffff") + ";"
                 + "color:" + (dark ? "#ededed" : "#14212a") + ";"
-                + "font:14.5px/1.68 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;"
+                + "font:15px/1.65 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;"
                 // The letter needs its own margin. This was 2px, so the message text
                 // ran into the frame edge while the header directly above it sat 16 to
                 // 22px in, and the two never lined up. The frame is a separate document
@@ -1161,6 +1232,18 @@ public final class MailHtmlSanitizer {
                 + "a{color:var(--jcl)}"
                 + "img{max-width:100%;height:auto}"
                 + "table{max-width:100%}"
+                // The <font size> attribute is the other half of the small-type problem
+                // and it cannot be clamped the way a CSS declaration can, because it is
+                // an index from 1 to 7 rather than a length. 1 and 2 are the ones that
+                // land under the floor, and they are exactly what an Outlook signature
+                // block and a quoted reply chain are written in.
+                + "font[size=\"1\"],font[size=\"2\"]{font-size:14px}"
+                // Line height only. Nothing here tries to override a size the sender
+                // set: an inline style or a class beats a type selector anyway, so such
+                // a rule would fire only where no size exists, which is precisely where
+                // it is not needed, while risking flattening something deliberate.
+                // atLeastReadable does the real work, at the declaration.
+                + "p,li,td,th{line-height:1.6}"
                 + ".jc-plain{white-space:pre-wrap;font:14px/1.65 ui-monospace,\"Cascadia Mono\",Consolas,monospace;margin:0}"
                 + ".jc-empty{color:var(--jcm);font-style:italic}"
                 + ".jc-blocked-img{min-width:26px;min-height:26px;border:1px dashed var(--jcd);"
