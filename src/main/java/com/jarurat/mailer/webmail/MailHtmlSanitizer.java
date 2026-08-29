@@ -133,6 +133,37 @@ public final class MailHtmlSanitizer {
             "expression(", "javascript:", "vbscript:", "-moz-binding", "behavior:", "@import",
             "@charset", "@namespace"};
 
+    /**
+     * The one script allowed to run inside a message frame, and the only reason the
+     * sandbox now carries allow-scripts at all.
+     *
+     * The frame cannot report its own height without scripting, so the reader had to
+     * give it a fixed height and let it scroll internally. That put two scrollers on
+     * one pane, one for the header and one for the letter, and a touch gesture does
+     * not chain from the outer to the inner: the message stopped moving partway
+     * through and the rest of it was unreachable without lifting a finger and starting
+     * again. Reported as the mail being cut off, which is exactly how it reads.
+     *
+     * With the height known the frame is sized to its content, the wrapper stops
+     * scrolling, and the pane has one scroller from the subject to the last line.
+     *
+     * What this does NOT give away. The sandbox still has no allow-same-origin, so the
+     * frame runs in an opaque origin: it cannot read our cookies, reach our DOM, or
+     * call our API even if the sanitiser above is one day defeated. And script-src is
+     * pinned to the sha256 of exactly this source, so a script the tokeniser somehow
+     * missed does not match the hash and does not execute. The hash is over the string
+     * byte for byte; changing so much as a space here without recomputing it silently
+     * turns the sizing off, which is a broken reader rather than a security hole, but
+     * it is worth knowing before editing.
+     */
+    private static final String HEIGHT_REPORTER =
+            "(function(){function r(){parent.postMessage({jmHeight:Math.max(document.documentElement.scrollHeight,"
+            + "document.body?document.body.scrollHeight:0)},'*');}if(document.readyState==='loading')"
+            + "{document.addEventListener('DOMContentLoaded',r);}else{r();}window.addEventListener('load',r);"
+            + "window.addEventListener('resize',r);setTimeout(r,300);setTimeout(r,1200);})();";
+
+    private static final String HEIGHT_REPORTER_HASH = "sha256-aj11KTDM/4IGGcIiAgMSau/PKTR40g0JkpK4dY8iNe8=";
+
     private static final Pattern CSS_COMMENT = Pattern.compile("/\\*.*?\\*/", Pattern.DOTALL);
     private static final Pattern CSS_URL = Pattern.compile("url\\s*\\(([^)]*)\\)", Pattern.CASE_INSENSITIVE);
     private static final Pattern LINKIFY = Pattern.compile("https?://[^\\s<>\"')\\]]+");
@@ -173,6 +204,10 @@ public final class MailHtmlSanitizer {
         String src = rawHtml.length() > MAX_INPUT ? rawHtml.substring(0, MAX_INPUT) : rawHtml;
         StringBuilder out = new StringBuilder(Math.min(src.length() + 512, MAX_INPUT));
         Deque<String> open = new ArrayDeque<>();
+        // Runs in lockstep with open, recording which of those elements painted a light
+        // ground, so a child can be asked what it is actually sitting on.
+        Deque<Boolean> lightGround = new ArrayDeque<>();
+        int lightDepth = 0;
         int[] blocked = {0};
 
         int i = 0;
@@ -214,6 +249,9 @@ public final class MailHtmlSanitizer {
                 String popped;
                 do {
                     popped = open.pop();
+                    // Popped in step with open, so the inherited-ground depth unwinds
+                    // exactly when the element that painted it closes.
+                    if (!lightGround.isEmpty() && Boolean.TRUE.equals(lightGround.pop())) lightDepth--;
                     out.append("</").append(popped).append('>');
                 } while (!popped.equals(name));
                 continue;
@@ -242,12 +280,32 @@ public final class MailHtmlSanitizer {
 
             if (open.size() >= MAX_DEPTH) continue;
 
+            // Whether this element paints a light ground that its CHILDREN will sit on.
+            //
+            // Checking only the element's own rule was not enough and produced exactly
+            // the failure it was meant to prevent. The "this message came from outside
+            // your organisation" banner that many senders prepend is a table carrying
+            // a light grey background wrapping a span carrying colour:#000 and no
+            // background of its own. The span was therefore treated as needing a lift,
+            // its near-black was turned near-white, and it landed white on light grey:
+            // completely invisible, which is what was reported.
+            //
+            // So the ground is inherited the way it actually is on screen. While the
+            // walk is inside anything that painted itself light, nothing below it is
+            // lifted, because down there the sender's dark text is correct.
+            boolean paintsLight = darkGround && paintsLightGround(tag.attrs);
+            boolean liftHere = darkGround && lightDepth == 0;
+
             out.append('<').append(name);
-            writeAttributes(name, tag.attrs, allowRemoteImages, out, blocked, darkGround);
+            writeAttributes(name, tag.attrs, allowRemoteImages, out, blocked, liftHere);
             out.append('>');
             if (!VOID.contains(name)) {
                 if (tag.selfClosing) out.append("</").append(name).append('>');
-                else open.push(name);
+                else {
+                    open.push(name);
+                    lightGround.push(paintsLight);
+                    if (paintsLight) lightDepth++;
+                }
             }
         }
 
@@ -685,6 +743,72 @@ public final class MailHtmlSanitizer {
         return out.toString();
     }
 
+    /**
+     * Does this element paint a ground light enough that dark text on it is correct.
+     *
+     * Reads both the modern and the ancient way of saying it, because the messages this
+     * matters for are exactly the ones written in table markup from 2004: a style
+     * attribute carrying background or background-color, and the bgcolor attribute.
+     * A dark ground the sender chose is not interesting here, since text on it already
+     * needs to be light and the lift would leave it alone anyway.
+     */
+    private static boolean paintsLightGround(Map<String, String> attrs) {
+        String candidate = null;
+        String bg = attrs.get("bgcolor");
+        if (bg != null && !bg.isBlank()) candidate = bg;
+
+        String style = attrs.get("style");
+        if (style != null) {
+            for (String decl : splitDeclarations(prepareCss(style))) {
+                String p = propertyOf(decl);
+                if (("background".equals(p) || "background-color".equals(p)) && !isTransparent(decl)) {
+                    candidate = decl.substring(decl.indexOf(':') + 1);
+                    break;
+                }
+            }
+        }
+        if (candidate == null) return false;
+
+        int[] rgb = firstColour(candidate);
+        if (rgb == null) return false;
+        double lum = 0.2126 * srgb(rgb[0]) + 0.7152 * srgb(rgb[1]) + 0.0722 * srgb(rgb[2]);
+        // Anything above a mid grey is a ground the sender expects dark text on. The
+        // threshold is deliberately generous: treating a ground as light when it is
+        // borderline leaves the sender's own colours alone, which is the safe mistake.
+        return lum > 0.18;
+    }
+
+    /** The first hex or rgb() colour in a value, or null when there is none. */
+    private static int[] firstColour(String value) {
+        Matcher hex = CSS_HEX.matcher(value);
+        if (hex.find()) {
+            String h = hex.group(1);
+            if (h.length() == 3) {
+                h = "" + h.charAt(0) + h.charAt(0) + h.charAt(1) + h.charAt(1) + h.charAt(2) + h.charAt(2);
+            }
+            return new int[]{Integer.parseInt(h.substring(0, 2), 16),
+                             Integer.parseInt(h.substring(2, 4), 16),
+                             Integer.parseInt(h.substring(4, 6), 16)};
+        }
+        Matcher rgb = CSS_RGB.matcher(value);
+        if (rgb.find()) {
+            return new int[]{clamp255(Integer.parseInt(rgb.group(1))),
+                             clamp255(Integer.parseInt(rgb.group(2))),
+                             clamp255(Integer.parseInt(rgb.group(3)))};
+        }
+        // A bare colour keyword. Only the handful that actually turn up as a banner
+        // ground are worth knowing, and everything else falls through as "not light",
+        // which leaves the lift on and is the behaviour without this method at all.
+        String v = value.trim().toLowerCase(Locale.ROOT);
+        return switch (v) {
+            case "white", "#fff", "ivory", "snow", "whitesmoke" -> new int[]{255, 255, 255};
+            case "lightgrey", "lightgray", "gainsboro" -> new int[]{211, 211, 211};
+            case "silver" -> new int[]{192, 192, 192};
+            case "beige", "cornsilk", "lightyellow" -> new int[]{245, 245, 220};
+            default -> null;
+        };
+    }
+
     private static String propertyOf(String decl) {
         int colon = decl.indexOf(':');
         return colon <= 0 ? "" : decl.substring(0, colon).trim().toLowerCase(Locale.ROOT);
@@ -1004,7 +1128,7 @@ public final class MailHtmlSanitizer {
         return "<!doctype html><html><head><meta charset=\"utf-8\">"
                 + "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; "
                 + "img-src " + imgSrc + "; style-src 'unsafe-inline'; font-src data:; "
-                + "script-src 'none'; object-src 'none'; frame-src 'none'; "
+                + "script-src '" + HEIGHT_REPORTER_HASH + "'; object-src 'none'; frame-src 'none'; "
                 + "form-action 'none'; base-uri 'none'\">"
                 + "<meta name=\"referrer\" content=\"no-referrer\">"
                 // color-scheme is set explicitly and is not decoration. Without it the
@@ -1041,7 +1165,11 @@ public final class MailHtmlSanitizer {
                 + ".jc-empty{color:var(--jcm);font-style:italic}"
                 + ".jc-blocked-img{min-width:26px;min-height:26px;border:1px dashed var(--jcd);"
                 + "border-radius:4px;background:var(--jcs)}"
-                + "</style></head><body>" + fragment + "</body></html>";
+                // Last in the body, so it measures a document that has finished being
+                // built rather than one still being parsed.
+                + "</style></head><body>" + fragment
+                + "<script>" + HEIGHT_REPORTER + "</script>"
+                + "</body></html>";
     }
 
     // Colour literals rather than the console's CSS custom properties, because a

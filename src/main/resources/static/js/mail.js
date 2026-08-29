@@ -904,6 +904,35 @@ function renderReader(m, wasOpen) {
  * inside it, and the toolbar goes off the top of the screen with nothing left to
  * bring it back. The wrapper scrolls and the frame keeps its own height.
  */
+/**
+ * Grows the message frame to its own content, so the pane has ONE scroller.
+ *
+ * The frame reports its height by postMessage. It is an opaque origin, so the event's
+ * origin is the string "null" and is worth nothing as a check; identity is established
+ * by comparing event.source against this frame's contentWindow, which no other
+ * document can forge. The number is clamped, because a message that claims to be
+ * 900,000 pixels tall would otherwise be allowed to build a scrollbar out of nothing.
+ *
+ * The listener is removed when the frame goes, since a reader that is opened and
+ * closed forty times in a session would otherwise leave forty listeners behind, each
+ * holding a dead frame.
+ */
+function listenForHeight(frame, wrap) {
+  const MAX = 60000;
+  function onMessage(e) {
+    if (!frame.isConnected) { window.removeEventListener('message', onMessage); return; }
+    if (e.source !== frame.contentWindow) return;
+    const h = e.data && e.data.jmHeight;
+    if (typeof h !== 'number' || !isFinite(h) || h <= 0) return;
+    const px = Math.min(Math.round(h), MAX);
+    frame.style.height = px + 'px';
+    // Once the frame carries its own height the wrapper has nothing left to scroll,
+    // and two nested scrollers on one pane is the thing being removed here.
+    wrap.classList.add('sized');
+  }
+  window.addEventListener('message', onMessage);
+}
+
 function mountBody(container, doc) {
   const old = container.querySelector('.rwrap');
   if (old) old.remove();            // two 400KB srcdoc documents per open is a real leak
@@ -911,11 +940,18 @@ function mountBody(container, doc) {
   wrap.className = 'rwrap';
   const frame = document.createElement('iframe');
   frame.className = 'rframe';
-  frame.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox');
+  // allow-scripts is here for exactly one script: the height reporter the sanitiser
+  // appends, which the frame's own CSP pins to a sha256 so nothing else can run.
+  // allow-same-origin is deliberately still absent, so the frame has an opaque origin
+  // and cannot read our cookies, our DOM or our API whatever runs inside it. See
+  // MailHtmlSanitizer.HEIGHT_REPORTER for why the height is worth this.
+  frame.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox allow-scripts');
   frame.setAttribute('referrerpolicy', 'no-referrer');
   frame.setAttribute('title', 'Message body');
+  frame.setAttribute('scrolling', 'no');
   wrap.appendChild(frame);
   container.appendChild(wrap);
+  listenForHeight(frame, wrap);
   frame.srcdoc = doc;
 }
 
