@@ -31,6 +31,50 @@
 </head>
 <body>
 <th:block th:fragment="script">
+    <!--
+      THE ESCAPE HATCH, AND WHY IT IS INLINE.
+
+      A service worker keeps running its own previous script until every tab for the
+      site is closed, which on a home screen can be weeks. So when a worker is stale,
+      everything that could fix it is stale too: update.js is a file, files are cached
+      by that worker, and asking it to fetch its own replacement is asking the broken
+      part to repair itself. That is why the only cure anybody had was deleting the app
+      and adding it again.
+
+      This script is different because it is not a file. Pages are never cached, by the
+      rule at the top of sw.js, so this markup arrives fresh from the server on every
+      single load no matter how old the installed worker is. It is the one piece of
+      code that is always current, which makes it the only safe place to put the reset.
+
+      Opening any page with "?update=1" unregisters every worker, deletes every cache
+      and reloads clean. Deliberately not automatic: it throws away the offline copy,
+      so it happens when somebody asks for it.
+    -->
+    <script>
+    (function () {
+        if (location.search.indexOf('update=1') < 0) return;
+        var done = function () {
+            var u = location.href.replace(/[?&]update=1/, '').replace(/\?$/, '');
+            location.replace(u + (u.indexOf('?') < 0 ? '?' : '&') + 'fresh=' + Date.now());
+        };
+        var jobs = [];
+        try {
+            if (navigator.serviceWorker) {
+                jobs.push(navigator.serviceWorker.getRegistrations()
+                    .then(function (rs) { return Promise.all(rs.map(function (r) { return r.unregister(); })); }));
+            }
+            if (window.caches) {
+                jobs.push(caches.keys().then(function (ks) {
+                    return Promise.all(ks.map(function (k) { return caches.delete(k); }));
+                }));
+            }
+        } catch (e) { /* nothing here is worth blocking the page for */ }
+        // Reload regardless. A browser that refuses one of these must still end up on a
+        // fresh page rather than sitting on the old one forever.
+        Promise.all(jobs).then(done, done);
+        setTimeout(done, 4000);
+    })();
+    </script>
     <script src="/js/pwa.js"></script>
 </th:block>
 </body>

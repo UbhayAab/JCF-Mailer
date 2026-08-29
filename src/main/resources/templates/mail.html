@@ -537,6 +537,12 @@
         .mrow:hover{background:var(--panel-3);color:var(--text);text-decoration:none}
         .mrow:active{background:var(--panel-3)}
         .mrow span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        /* A row that carries a second line needs to stop being one, and its label has to
+           be allowed to wrap or the explanation is ellipsised into nothing. */
+        .mrow:has(small){min-height:60px;align-items:flex-start;padding-top:9px;padding-bottom:9px}
+        .mrow small{display:block;margin-top:2px;font-size:12px;font-weight:400;line-height:1.4;
+                    color:var(--text-mute);white-space:normal}
+        .mrow:has(small) .ic{margin-top:2px}
         .mrow .chev{color:var(--text-faint);flex:none}
         /* --danger-fg and never --danger: the solid red fails as text at this size. */
         .mrow.danger,.mrow.danger:hover{color:var(--danger-fg)}
@@ -1489,6 +1495,15 @@
                  change. -->
             <button class="mrow" type="button" data-jm-update>
                 <svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg><span>Check for updates</span></button>
+            <!-- The one that always works, including when the worker is too old to know
+                 how to update itself. It goes through the inline handler in the pwa
+                 fragment rather than through any script file, because a file is exactly
+                 what a stale worker is still serving from its cache. This is a plain
+                 link and not a button for the same reason: it must survive a page whose
+                 JavaScript never ran. -->
+            <a class="mrow" href="?update=1">
+                <svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>
+                <span>Reload the app<small>Clears the cache and fetches everything fresh</small></span></a>
             <!-- "Stay signed in on this device" is only defensible if this row
                  exists, so it is not optional and it is not buried in settings. -->
             <button class="mrow" type="button" id="shDevices">
