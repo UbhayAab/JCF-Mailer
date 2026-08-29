@@ -89,6 +89,20 @@
         .si-help { margin: 18px 0 0; padding-top: 16px; border-top: 1px solid var(--border);
                    font-size: 12.5px; line-height: 1.55; color: var(--text-mute); }
 
+        /* The install offer. Scoped here rather than added to style.css because it is
+           the only page that shows it and the stylesheet is shared with the console. */
+        .si-install { margin: 16px 0 0; padding: 14px; border: 1px solid var(--border-strong);
+                      border-radius: var(--r-md); background: var(--panel-2); }
+        .si-install[hidden] { display: none; }
+        .si-install-row { display: flex; gap: 12px; align-items: flex-start; }
+        .si-install-row .ic { color: var(--primary-fg); margin-top: 1px; }
+        .si-install-t { margin: 0 0 3px; font-size: 13.5px; font-weight: 620; color: var(--text); }
+        .si-install-s { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text-dim); }
+        .si-install-go { width: 100%; margin-top: 12px; min-height: 44px; }
+        .si-about { margin: 16px 0 0; font-size: 12.5px; text-align: center; }
+        .si-about a { color: var(--text-mute); text-decoration: none; }
+        .si-about a:hover { color: var(--text-dim); text-decoration: underline; }
+
         /* ---------- laptop ---------- */
         @media (min-width: 900px) {
             .si { grid-template-columns: minmax(0, 46fr) minmax(0, 54fr); }
@@ -200,6 +214,35 @@
                 No account yet, or the password stopped working? Ask whoever set up
                 your address at the foundation.
             </p>
+
+            <!--
+              A phone that is not signed in now arrives here rather than at the landing
+              page, because somebody opening this on a phone almost always wants their
+              inbox and should not have to read a product pitch and find a button first.
+              That makes this the only place a phone visitor is offered the app, so the
+              install option has to live here too rather than only on the page they no
+              longer see.
+
+              pwa.js listens for data-jm-install anywhere on the page and picks the right
+              flow per platform: the real prompt on Android and Chromium, the Share sheet
+              steps on iOS Safari, and the browser-menu wording elsewhere. It also hides
+              this block outright once the app is installed, since there is nothing left
+              to offer at that point.
+            -->
+            <div class="si-install" id="siInstall" hidden>
+                <div class="si-install-row">
+                    <svg class="ic ic-lg" aria-hidden="true"><use href="#i-install"/></svg>
+                    <div>
+                        <p class="si-install-t">Use it like an app</p>
+                        <p class="si-install-s">Add Jarurat Mail to your home screen and it
+                            opens full screen, with no browser bar.</p>
+                    </div>
+                </div>
+                <button type="button" class="btn si-install-go" data-jm-install>Install</button>
+            </div>
+            <p class="si-about">
+                <a th:href="@{/(about=1)}">What is Jarurat Mail?</a>
+            </p>
         </div>
     </main>
 </div>
@@ -222,6 +265,20 @@
                 peek.setAttribute('aria-label', reveal ? 'Hide password' : 'Show password');
             });
         }
+
+        /* The install block ships hidden and is revealed only when there is genuinely
+           something to install. Someone already running the installed copy would
+           otherwise be offered it again from inside it, which reads as the app not
+           knowing what it is. The same three signals pwa.js uses, repeated here rather
+           than imported, because this must be right on first paint and pwa.js is
+           loaded at the end of the body. */
+        var installed = (window.matchMedia
+                && (window.matchMedia('(display-mode: standalone)').matches
+                 || window.matchMedia('(display-mode: minimal-ui)').matches))
+            || window.navigator.standalone === true
+            || document.referrer.indexOf('android-app://') === 0;
+        var offer = document.getElementById('siInstall');
+        if (offer && !installed) offer.hidden = false;
 
         /* autofocus as an attribute would fire on a phone too, where it opens the
            keyboard over the whole page on arrival, before anyone has decided to

@@ -1,5 +1,6 @@
 package com.jarurat.mailer.controllers;
 
+import com.jarurat.mailer.security.DeviceHints;
 import com.jarurat.mailer.security.LoginLandingHandler;
 import com.jarurat.mailer.security.SignedInUser;
 import jakarta.servlet.http.HttpServletRequest;
@@ -11,9 +12,24 @@ import org.springframework.web.bind.annotation.GetMapping;
 @Controller
 public class PageController {
 
+    /**
+     * The front door.
+     *
+     * A phone that is not signed in goes straight to the sign-in form rather than to
+     * the marketing page. Somebody opening this on a phone is almost always a member
+     * of staff who wants their inbox, and making them read a product pitch and find a
+     * button first is a tax on the common case. The landing page is still there for
+     * anyone who wants it, at "/?about=1", and the sign-in page carries the install
+     * option itself so nothing is lost by skipping past.
+     *
+     * A laptop still gets the landing page, because on a laptop this genuinely is two
+     * products and the page is where the choice between them is made.
+     */
     @GetMapping("/")
     public String landing(@AuthenticationPrincipal SignedInUser user, HttpServletRequest request) {
-        return user == null ? "landing" : "redirect:" + landingFor(user, request);
+        if (user != null) return "redirect:" + landingFor(user, request);
+        boolean wantsTheTour = request.getParameter("about") != null;
+        return !wantsTheTour && DeviceHints.isPhone(request) ? "redirect:/login" : "landing";
     }
 
     @GetMapping("/login")
