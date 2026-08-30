@@ -1,15 +1,26 @@
 # Jarurat Mail / Campaign Studio - UI specification
 
-The single contract every screen is built against. If a rule here and the code
-disagree, the code is wrong.
+The single contract every screen is built against.
+
+Two kinds of sentence live in here and they settle disagreements in opposite
+directions. Where a **design rule** and the code disagree, the code is wrong and
+gets changed. Where a **statement of fact about what the code does** disagrees
+with the code, this document is wrong and gets changed. Reading the second kind
+as the first is how a correct feature gets deleted for not being in the spec, and
+it has already happened here. Section 16 says how the two are told apart and how
+a stale fact is meant to be caught.
 
 Constraints that are not negotiable, because the box must render with zero
 external requests and the app ships as one jar:
 
 - No CSS framework, no icon font, no chart library, no CDN. Everything inlined
   or served from `/static`.
-- Content-Security-Policy is `default-src 'self'`. No remote font, no remote
-  image, no remote script.
+- The application's own chrome makes no external request: no remote font, no
+  remote image, no remote script, in any template or stylesheet we ship. The
+  Content-Security-Policy that enforces the surrounding boundary starts
+  `default-src 'self'` but is longer than that and is **not** what this line
+  implies. It is quoted verbatim in 14.11, which is the only place in this
+  document that may state it. Read that before changing a header.
 - Thymeleaf templates plus vanilla JS. No build step, no bundler.
 - Google Fonts cannot be loaded. The type stack is the system stack.
 
@@ -68,7 +79,30 @@ measured against the surface it actually sits on, not against `--bg`.
 popups, date pickers, scrollbars and the autofill wash light blue on a near
 black page, and no amount of token work reaches those.
 
-There is no light theme and no `prefers-color-scheme` block. One theme.
+**The app chrome has one theme.** `style.css`, `mail.html`, `login.html`,
+`landing.html` and `offline.html` carry no light palette and no
+`prefers-color-scheme` block, and none is wanted.
+
+That rule stops at the edge of the application's own markup, and the exception is
+not a lapse. Two surfaces are separate documents holding HTML somebody else
+wrote, and both are deliberately pinned light and both do carry
+`prefers-color-scheme` handling:
+
+- The reader frame, wrapped by `MailHtmlSanitizer.wrapDocument`. Pinning the
+  ground alone was not enough. `color-scheme` sets what a document may render, not
+  what the media query reports, so on a machine set to dark the sender's own
+  dark-mode block still fired and painted white text onto our forced white paper.
+  Measured at 1.00:1: the letter was one colour and read as an empty message.
+  `rebuildRules` therefore drops a `prefers-color-scheme: dark` block and unwraps
+  a light one, so the ground and the media query agree. `wrapDocument` also takes
+  a `theme` of auto, light, dark or original, and only `auto` emits a dark block.
+- The campaign preview frame, built by `previewDocument` in `console.js`, which
+  repeats a `prefers-color-scheme: dark` rule that restates the light values for
+  the same reason and is kept in step with `wrapDocument`.
+
+Neither is a light theme for this application. Deleting either one restores the
+blank-message defect, so a sweep for `prefers-color-scheme` must not treat those
+four files as violations of this section.
 
 ## 3. Elevation
 
@@ -121,7 +155,8 @@ Safari zoom the whole page on focus, and the page never zooms back.
 
 ## 6. Icons
 
-One system, defined in `templates/fragments/icons.html`, used as:
+One system, defined in `templates/fragments/icons.html`, which holds 95 `<symbol>`
+elements at the time of writing. Used as:
 
 ```html
 <svg class="ic" aria-hidden="true"><use href="#i-inbox"/></svg>
@@ -129,10 +164,17 @@ One system, defined in `templates/fragments/icons.html`, used as:
 
 ```css
 .ic { width:18px; height:18px; flex:none; fill:none; stroke:currentColor;
-      stroke-width:1.75; stroke-linecap:round; stroke-linejoin:round; }
+      stroke-width:1.75; stroke-linecap:round; stroke-linejoin:round;
+      pointer-events:none; }
 .ic-lg { width:20px; height:20px }
 .ic-sm { width:15px; height:15px; stroke-width:1.9 }
+.ic-32 { width:32px; height:32px; stroke-width:1.5; color:var(--text-faint) }
 ```
+
+`pointer-events:none` is in that base and is not cosmetic: without it the `<svg>`
+becomes the click target inside every icon-only button and the delegated handlers
+stop firing. 14.8 has the full account. `.ic-32` is the empty and error state
+size from section 9.
 
 **No emoji. No dingbats. No text glyphs as icons. Ever.** Not `&#128274;`, not
 `✉`, not `➤`, not `◆`. Those are font characters, so the device chooses how they
@@ -180,7 +222,10 @@ Three states, always all three, never a blank box.
 
 ## 10. The phone mailbox
 
-This is the part that does not exist yet and matters most.
+**Built and shipped.** This section was written while none of it existed and it
+still reads that way in places; the rules in it are live and the tense is not.
+Section 14 is the resolved version and 14.10 is the acceptance list it was
+signed off against.
 
 Below 900px the sidebar rail is **gone**, not folded into a horizontal
 scroller. A horizontal scroller hides its own tail: today "Install app",
@@ -225,9 +270,12 @@ Line 3: preview, one line, `--text-mute`.
 Unread carries a 7px `--primary` dot at the left edge of the avatar, not a
 separate column.
 
-**The current row is broken and must be fixed**: the bottom border sits above
-the preview line, so every preview reads as if it belongs to the message below
-it. Look at any phone screenshot and the misreading is immediate.
+**That row was broken and has been fixed.** The bottom border sat above the
+preview line, so every preview read as if it belonged to the message below it.
+Both mechanisms are described in 14.0 and the repair is in 14.4: `mail.html` now
+carries `.msg::after` inset to `left:68px` rather than a full-bleed
+`border-bottom`, and the padding is 16 top against 8 bottom. Do not reintroduce
+`border-bottom` on `.msg` below 900px.
 
 ### Message row, desktop
 
@@ -244,6 +292,13 @@ The console is not the phone product, but it must not be broken there.
 Below 900px the console rail becomes a **slide-in drawer** behind a hamburger
 in the topbar, with a scrim. Not a horizontal scroller.
 
+**Built.** `console.html` carries `header.mobile-topbar` with `#navToggle`
+(`aria-controls="navDrawer"`, `aria-expanded`), the rail as
+`aside.sidebar#navDrawer`, and `#navScrim`; `style.css` holds the geometry in its
+`@media (max-width:900px)` block, drawer at z-index 70 over a scrim at 60. The
+keyboard defect 14.11 recorded against the same rows is fixed too: every
+`div.nav-item` now carries `role="button"` and `tabindex="0"`.
+
 Tables keep the existing card treatment (`stampTableLabels`), which works.
 Charts keep measuring `clientWidth` so one SVG unit is one CSS pixel.
 
@@ -256,17 +311,25 @@ Charts keep measuring `clientWidth` so one SVG unit is one CSS pixel.
 A phone visitor who is not signed in lands on a page whose primary action is
 **Install**, not "Sign in". Android and Chromium fire `beforeinstallprompt` and
 get a real button. iOS Safari gets the Share sheet steps. Anything else gets
-the browser-menu wording. The card is already built in `static/js/pwa.js`; what
-is missing is the landing page treating install as the headline.
+the browser-menu wording. The card is built in `static/js/pwa.js`.
+
+**Built.** `landing.html` leads with `button.lp-b.lp-install` reading "Install the
+app" and repeats the offer lower down as `button.lp-row.lp-installrow`;
+`login.html` carries `#siInstall` with its own `data-jm-install` button. `pwa.js`
+delegates on `closest('[data-jm-install]')`, so every one of those works with no
+per-page wiring and a new one needs only the attribute.
 
 ### One login
 
-Today a person signs into the console with one password and then hits a second
+A person used to sign into the console with one password and then hit a second
 prompt for the mailbox password, because Campaign Studio authenticates against
-`app_user` and Stalwart authenticates against its own store. On a phone that is
-two passwords before any mail appears, and most people only have the second.
+`app_user` and Stalwart authenticates against its own store. On a phone that was
+two passwords before any mail appeared, and most people only have the second.
 
-The rule from here:
+**Built.** `SecurityConfig.authenticationManager` puts `DaoAuthenticationProvider`
+ahead of `MailboxAuthenticationProvider` on one `ProviderManager`;
+`LoginLandingHandler` offers the accepted password to the mail server and then
+picks the landing route. The rule below is what those enforce:
 
 1. One form. Email and password.
 2. The console provider tries `app_user` first. If it succeeds, the same
@@ -280,9 +343,54 @@ The rule from here:
 4. Landing: a mail-only session always lands on `/mail`. A console session
    lands on `/mail` from a phone and `/app` from a laptop.
 
+**Point 4 no longer describes the code, and the change was deliberate.**
+`LoginLandingHandler.landingFor` decides in this order: an empty or
+`MAIL_READ`-less set goes to `/app` (VIEWER holds no mail permission at all, and
+sending a viewer to `/mail` hands them a 403 rather than a screen); a mail-only
+set goes to `/mail`; **everyone else goes to `/app` on every device**, with
+`?desktop=1` and an explicit mailbox request as the only overrides. Its own
+comment gives the reason: signing in on a phone with the account that runs
+Campaign Studio used to land on the inbox with the console reachable only by
+knowing to add a query parameter, which reads as the sign-in having gone
+somewhere unintended. The account decides now, not the device.
+
+That is a real conflict with this section and with section 1's "The default on a
+phone", not just a stale sentence, and this pass does not resolve it: which
+surface a console account should get on a phone is a design decision and belongs
+to whoever owns section 1. What is settled is the fact. Anyone changing either
+side reads `LoginLandingHandler` first.
+
 Point 3 is the security boundary and it does not move. A mailbox password buys
 its own mailbox and nothing else - the same thing it already buys in any IMAP
-client. It never buys the ability to send a campaign.
+client. It never buys the ability to send a campaign. `Role.MAILBOX` still holds
+exactly `MAIL_READ` and `MAIL_SEND`, and `SecurityConfig.MAIL_ONLY_PATHS` is the
+list such a session may reach.
+
+### What the session does after that, which this section did not used to say
+
+Two things were added to the session model after this section was written. Both
+are on screen, both have their own files, and neither is described anywhere else
+in this document, which is how a reader ends up believing sign-in is one form and
+nothing more.
+
+1. **The sign-in expires after eight hours of inactivity, and says so.**
+   `static/js/session.js` with `templates/fragments/session.html` draws a
+   countdown, warns a few minutes out with a way to stay, and states plainly when
+   it is over rather than letting the next click fail. It reads `GET /api/session`
+   (or `/api/mail/session` on a mail-only session, because the first answers 403
+   there) and does arithmetic locally against the server's own clock, so it does
+   not poll and cannot keep the session alive by watching it. Its scrim is
+   z-index 140 and its dialog 150, per section 15.
+2. **A device can stay signed in across sessions.** `device/DeviceTokenService`,
+   `DeviceCookie`, `DeviceCredentialCipher` and `PersistentDeviceFilter` mint a
+   rotating token that carries the key to a sealed copy of the mailbox password,
+   so a phone comes back signed in with no prompt. Enrolment happens in the
+   filter and not in `LoginLandingHandler`, because the handler offers the
+   password to the mail server on a thread that outlives the redirect and the
+   mailbox is usually not open yet when it runs. Sign out deletes the row, which
+   destroys the only copy of that password. `/api/devices/**` is on
+   `MAIL_ONLY_PATHS` deliberately: the person most likely to need to sign a lost
+   phone out is exactly the one with no `app_user` row.
 
 ---
 
@@ -313,9 +421,15 @@ text, animated backgrounds, or an accent colour on every element.
 Binding. Where this section and sections 10 or 13 disagree in detail, this one
 is newer and wins; where it is silent, they still apply.
 
-Two files change: `templates/mail.html` and `static/js/mail.js`. Everything else
-listed under "Hand-off" at the end is somebody else's commit and blocks the
-release.
+**Shipped.** Read this section as the record of a change that landed, not as work
+outstanding. Two files changed at the time: `templates/mail.html` and
+`static/js/mail.js`. Everything under "Hand-off" at the end was somebody else's
+commit and blocked that release; 14.11 says where each of those stands now.
+
+The mailbox has moved on since. The rules below still hold and the geometry is
+still the shipped geometry, but the markup quoted in 14.2 is a snapshot of that
+commit rather than the current file, and every place it has since drifted is
+marked inline. Diff against `mail.html` before believing an id here.
 
 ### 14.0 The border defect: two mechanisms, both real, measured
 
@@ -388,13 +502,26 @@ rename them. `mail.html` `<head>` changes first:
 <script src="/js/mail.js?v=phone1"></script>
 ```
 
+**Drifted.** That query string is now `?v=device1`. The version marker moves on
+every change that has to reach an installed phone, which is the whole point of it
+(14.8, third item), so the literal value here will always be a snapshot. What is
+binding is that the tag carries a `?v=` at all and that it is bumped in the same
+commit as the file it names.
+
 ```html
 <body>
 <th:block th:replace="~{fragments/icons :: sprite}"></th:block>
 
 <div class="app">
 
-  <!-- display:none below 900px. Not removed, so no listener needs a null guard. -->
+  <!-- display:none below 900px. Not removed, so no listener needs a null guard.
+
+       DRIFTED: the rail now carries `.navgroup` headings, `#folders` rendered by
+       renderFolders (the same markup that fills `#sheetFolders`), and a
+       `#railDevices` row. There is no `#railUnread`: the folder rows carry their
+       own counts, so the single Inbox badge below no longer exists anywhere.
+       `#railAvatar`, `#railEmail`, `#railCompose`, `#railLock` and the
+       `data-jm-install` row are unchanged. -->
   <aside class="rail">
     ... unchanged, except the six &#nnnn; glyphs become sprite icons per 14.7 ...
     <a class="nav" href="/mail" aria-current="true">
@@ -468,7 +595,15 @@ rename them. `mail.html` `<head>` changes first:
       </div>
 
       <!-- Always in the DOM, parked at translateX(100%). Never display:none:
-           a pane that does not exist cannot slide. -->
+           a pane that does not exist cannot slide.
+
+           DRIFTED: .rbar now carries nine actions, not four. Back, then
+           #rbarTitle, then #rbarWho (the sender, aria-hidden, revealed once the
+           head has scrolled past), then reply, reply-all, forward, flag,
+           archive, move, delete and more, ids #rReply #rReplyAll #rForward
+           #rStar #rArchive #rMove #rDelete #rMore. Every one is reached through
+           the single delegated [data-act] listener on #reader, so adding to that
+           bar is markup and a branch, never a new listener. -->
       <section class="reader" id="reader" aria-hidden="true">
         <div class="rbar">
           <button class="pib" type="button" data-act="back" aria-label="Back to the message list">
@@ -558,6 +693,10 @@ rename them. `mail.html` `<head>` changes first:
       <span class="qslot" id="sendHead"></span>
     </div>
     <div class="sheet-b">... existing fields, ids cTo cCc cSubject cBody unchanged ...</div>
+    <!-- DRIFTED: cTo, cCc and cSubject are still those ids, but cBody is gone.
+         The body is now #cEditor, a contenteditable with role="textbox", because
+         bold has to mean bold in the letter that is sent. A search for cBody
+         finds nothing and must not be read as the field having been lost. -->
     <div class="sheet-f">
       <span class="qslot" id="sendFoot"><button class="btn pri" type="button" id="btnSend">Send</button></span>
       <button class="btn" type="button" id="btnCancel">Cancel</button>
@@ -596,7 +735,11 @@ Rules that are load-bearing in that skeleton:
 - `#btnSend` and `#q` are single nodes relocated between `.qslot` spans by
   `placeChrome()` on a `matchMedia` change. `appendChild` on an existing node
   keeps its listeners, so one rotation mid-compose does not lose the draft or
-  the pending state.
+  the pending state. `placeChrome` now moves four nodes on the same principle,
+  not two: `#q` between `#qPhone` and `#qDesk`, `#btnSend` between `#sendHead`
+  and `#sendFoot`, `#composeFrom` between `#fromPhone` and `#fromHead`, and
+  `#fmtGroup` between `#fmtDock` and `#fmtDeck`. Anything else that has to exist
+  in two places joins that list rather than being mirrored.
 - The install rows keep `data-jm-install`; `pwa.js` already delegates on
   `closest('[data-jm-install]')` and needs no change.
 
@@ -604,11 +747,19 @@ Rules that are load-bearing in that skeleton:
 
 | Query | What changes |
 |---|---|
-| `@media (min-width:900px) and (max-width:1100px)` | The existing tablet block, **narrowed from `max-width:1100px`**. Contents unchanged: `.mail{grid-template-columns:1fr}`, `.folders{display:none}`, `.mail .reader{display:none}`, `.mail.reading .list{display:none}`, `.mail.reading .reader{display:flex}`, `.btnback{display:inline-flex}`. Narrowing is mandatory: `display:none` cannot be transformed, so an unnarrowed block kills the phone slide. |
+| `@media (min-width:900px) and (max-width:1100px)` | The existing tablet block, **narrowed from `max-width:1100px`**. Narrowing is mandatory: `display:none` cannot be transformed, so an unnarrowed block kills the phone slide. The contents listed here as unchanged have since changed twice, and both are deliberate: `.folders{display:none}` is gone, because the rail carries folders now and it is on screen at every width this block covers, and `.btnback` is gone in favour of `.rbar .pib[data-act="back"]{display:inline-grid}`, because the reader bar carries the only Back button there is. |
 | `@media (max-width:900px)` (the rail scroller) | **Delete the whole block.** It is the defect: `aside.rail` measures scrollWidth 843 against clientWidth 390 at 390px, and `scrollbar-width:none` plus `::-webkit-scrollbar{height:0}` hides the only hint that a tail exists. |
 | `@media (max-width:899.98px)` (new, placed last) | The entire phone shell: `.rail{display:none}`, `.app{grid-template-columns:1fr}`, `.phead{display:flex}`, `.topbar{display:none}`, `.tabbar{display:grid}`, `.mail{display:block;position:relative;overflow:hidden}`, `.folders{display:none}`, `.list{display:block}` and the whole list geometry, the reader pane, the sheets, full-screen compose, the FAB tab, `.pib`, `.btn{min-height:44px}`, and **the 16px input rule lifted out of the 760 block** so an 850px tablet does not get a tab bar and iOS-zooming inputs at once. Use 899.98 and not 900, because `max-width:900px` and `min-width:900px` both match at exactly 900. |
 | `@media (max-width:760px)` | Keep only the small-phone type lift and `.att`, `.fold`, `.pill`, `#toasts`. **Delete `.msg{min-height:44px;padding:13px 14px}`** (that line is the crush trigger) and **delete `.rmeta .avatar{display:none}`** (the reader avatar is now the colour chip and belongs there). |
 | `@media (prefers-reduced-motion:reduce)` | `.reader`, `.tabbar`, `.backdrop`, `.sheet`, `.fab`, `.sk` and `.spin` all drop to `transition:none; animation:none`. |
+
+Two more queries have been added to `mail.html` since, and they belong to the
+same shell rather than being strays to be tidied away:
+
+| Query | What changes |
+|---|---|
+| `@media (min-width:1101px)` | Both panes are on screen, so `.rbar-t` is hidden - the folder name is already in the topbar - and `.reader.nomsg .rbar` is hidden, because section 9 asks an empty state to carry the action that puts something here and seven greyed controls above a sentence carry none. Only here: below 1101px that bar holds the Back button. |
+| `@media (min-width:1340px)` | `.msg .prev{display:block}`. The desktop row is one line and the preview is the part that goes first; it comes back only where there is room for it. |
 
 Add the three motion tokens from section 7 to `:root` in `mail.html`
 (`--t-fast`, `--t-base`, `--t-slow`); they do not exist there yet. Add
@@ -751,8 +902,11 @@ The Compose tab is the cradled FAB: a 48px `--primary` disc with
 no second floating FAB anywhere on the list; `.fab-in-pane` exists only inside
 `.reader` as Reply, `position:absolute` against that pane.
 
-`#tabUnread` is `hidden` at zero and shows `n > 99 ? '99+' : n`, fed by the same
-reduce that already sets `#railUnread` in `renderFolders`.
+`#tabUnread` is `hidden` at zero and shows `n > 99 ? '99+' : n`, fed by a reduce
+over `S.folders` in `renderFolders`. It is the only consumer of that reduce now:
+`#railUnread` was removed when the rail gained the folder list, because every
+folder row carries its own count and a second Inbox badge above them said the
+same number twice.
 
 Two overrides that stay invisible until an iPhone finds them:
 `#toasts{bottom:calc(56px + env(safe-area-inset-bottom,0px) + 12px);left:12px;
@@ -875,9 +1029,16 @@ simply a no-op there and correct in Safari, in landscape and on Android.
 
 ### 14.7 Every glyph becomes a sprite symbol
 
-The audit counted 8 characters above U+2000 on `/mail` at 390px and 15 at
-1440px. Target is zero. All 69 symbols exist in `fragments/icons.html`,
-including `i-settings` and `i-mail-open`.
+**Done.** Every row of the table below has landed; it is kept as the record of
+what each glyph became, not as work outstanding. The audit counted 8 characters
+above U+2000 on `/mail` at 390px and 15 at 1440px, and the target was zero.
+
+The sprite has grown with the rest of the mailbox: `fragments/icons.html` holds
+95 symbols now, not the 69 it held when this table was written. Check the file
+before adding one, because the new arrivals cover most of what a new surface
+wants - `i-bold` through `i-clear-format` for the composer toolbar, `i-schedule`,
+`i-undo`, `i-snooze`, `i-signature`, `i-keyboard`, `i-select-all`,
+`i-mark-unread`, `i-bcc`, `i-save`, `i-sliders`.
 
 | Current | Where | Replacement |
 |---|---|---|
@@ -944,14 +1105,13 @@ JS. Apply the same to `.fold`, `.msg`, `.tab`, `.mrow` and `.pib`. Replace the
 per-render `head.addEventListener` with one delegated listener bound once on
 `#reader`, which also removes the listener leak on every re-render.
 
-**2. The message body is an iframe, and it is a black hole for height.**
-`mountBody` builds a sandbox with no `allow-same-origin` and no `allow-scripts`,
-correctly, so the frame can never report its content height and iOS Safari sizes
-it to that content while ignoring the CSS height. A long message then stretches
-the reader pane instead of scrolling inside it, the internal scroll never
-engages, and `.rbar` scrolls away with nothing to bring it back. The fix is a
-wrapper that scrolls while the frame keeps its natural height, and it belongs in
-`mountBody`:
+**2. The message body is an iframe, and it was a black hole for height.**
+`mountBody` built a sandbox with no `allow-same-origin` and no `allow-scripts`,
+so the frame could never report its content height and iOS Safari sized it to
+that content while ignoring the CSS height. A long message then stretched the
+reader pane instead of scrolling inside it, the internal scroll never engaged,
+and `.rbar` scrolled away with nothing to bring it back. The first fix was a
+wrapper that scrolls while the frame keeps its natural height:
 
 ```js
 function mountBody(container, doc) {
@@ -970,23 +1130,57 @@ function mountBody(container, doc) {
 }
 ```
 
-The sandbox list, the `referrerpolicy` and the property assignment of `srcdoc`
-are the security boundary documented in `MailHtmlSanitizer`. None of it moves.
-Mount the frame after the slide finishes: a srcdoc frame first laid out inside a
+The `referrerpolicy` and the property assignment of `srcdoc` are the security
+boundary documented in `MailHtmlSanitizer` and neither moves. Mount the frame
+after the slide finishes: a srcdoc frame first laid out inside a
 `visibility:hidden` subtree sometimes never paints on WebKit. `transitionend`
 does not fire when the element was already at its target and is absent entirely
 under reduced motion, so pair it with a 260ms timeout and take whichever fires
 first.
+
+**The sandbox list in that block is out of date and copying it back breaks the
+reader.** The wrapper alone left two nested scrollers on one pane, so the frame
+was given the ability to report its own height after all. The shipped line is:
+
+```js
+  // allow-scripts is here for exactly one script: the height reporter the
+  // sanitiser appends, which the frame's own CSP pins to a sha256 so nothing
+  // else can run. allow-same-origin is deliberately still absent.
+  frame.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox allow-scripts');
+  frame.setAttribute('scrolling', 'no');
+```
+
+What holds that safe is not the sandbox list on its own, so read all four parts
+together before touching any of them:
+
+- `MailHtmlSanitizer.HEIGHT_REPORTER` is the only script in the document, and the
+  frame's own meta CSP carries `script-src '<sha256 of that exact string>'`. A
+  script the sender wrote does not match the hash and does not run. Change one
+  character of the reporter and its hash has to be recomputed in the same commit,
+  or every message frame silently stops resizing.
+- `allow-same-origin` is still absent, so the frame is on an opaque origin and
+  cannot reach our cookies, our DOM or our API whatever runs in it.
+- `listenForHeight` in `mail.js` establishes identity by comparing `event.source`
+  against the frame's own `contentWindow`, never by origin: an opaque origin
+  posts the string `"null"`, which is worth nothing as a check. The height is
+  clamped to 60000px, or a message claiming to be 900,000px tall would build a
+  scrollbar out of nothing. The listener removes itself once the frame is gone.
+- Once the frame carries its own height, `.rwrap` gets `.sized` and stops being a
+  scroller, which is the point: one pane, one scroller.
 
 **3. The service worker will serve the old `mail.js` against the new
 `mail.html`.** `sw.js` precaches `/js/mail.js` stale-while-revalidate and
 deliberately never caches HTML. On the first launch after deploy an installed
 phone therefore gets the new template with the previous script: `#tabbar` has no
 wiring, `<body>` never gets `data-pane`, the reader never slides, and it reads
-as a total deployment failure. Both ends are needed: bump `VERSION` from
-`'jm-v1'` in `sw.js`, which is somebody else's file, and request
-`/js/mail.js?v=phone1` from `mail.html`, which changes the cache key even if the
-worker itself has not updated yet.
+as a total deployment failure. Both ends are needed: bump `VERSION` in `sw.js`,
+and bump the `?v=` on the script tag in `mail.html`, which changes the cache key
+even if the worker itself has not updated yet.
+
+The two literals this paragraph used to name have both moved on and will keep
+moving, which is the point of them. `sw.js` is at `'jm-v6'` and the script tag is
+at `?v=device1` at the time of writing. Neither number means anything; what is
+binding is that both are bumped in the same commit as the file they cover.
 
 Below those three: give `.list` and both sheets `overscroll-behavior:contain` so
 scroll never chains to the shell; keep `.app{height:100dvh;overflow:hidden}`
@@ -1000,15 +1194,54 @@ cannot race the status answer into a double unlock prompt.
 
 ### 14.9 Deliberately not built
 
-Swipe to archive or delete, pull to refresh, a second floating FAB, a phone
-drawer for the rail, virtualised list rendering, conversation threading,
-multi-select with batch actions (`/api/mail/move` and `/api/mail/delete` each
-take one id, so "archive 40" is 40 round trips with 40 ways to half-fail),
-draft autosave (there is no drafts endpoint), offline or `sessionStorage`
-caching of mail (the mailbox is password-gated per session on a device that gets
-handed around), push notifications, a custom edge-back gesture, drag-to-dismiss
-on sheets, `visualViewport` keyboard choreography, a light theme, and a separate
-phone template.
+This list is scoped to the commit described in section 14 and it has gone stale
+four times. A "deliberately not built" entry is the most dangerous sentence in
+this document, because a diligent reader who finds the feature anyway concludes
+it was added by mistake and takes it out. Per section 16, every entry below now
+names the file that would hold the thing, so the claim can be checked in one
+command instead of believed.
+
+**Four entries were wrong and have been removed. All four are built, wired and
+shipped. Do not delete any of them.**
+
+| Was listed as not built | Actually | Where it lives |
+|---|---|---|
+| Push notifications | Built | `static/js/notify.js` (browser half: ask, subscribe, stand the poll down), the `push/` package, and `sw.js` for rendering and clicking. Stalwart implements JMAP `PushSubscription` including the VAPID signing and the aes128gcm encryption, so this application is not in the delivery path and holds no key. Included by `mail.html` as `/js/notify.js?v=notify1`. |
+| Multi-select with batch actions | Built | `static/js/mailbulk.js`, with its markup and script tag in `fragments/shortcuts.html`, which `mail.html` includes. Selection, a bar, long-press and shift-extend, and an inverse-operation undo. |
+| Draft autosave | Built | `mail.js` `DRAFT`, `draftFields()`, `saveDraft()` and `resumeDraft()`, against `POST /api/mail/draft`, `POST /api/mail/draft/delete` and `GET /api/mail/draft` in `MailApiController`. A `sendBeacon` covers the close. |
+| `visualViewport` keyboard choreography | Built | `mail.js` `dockToKeyboard()`, with `revealWritingArea()` and `keepCaretVisible()`, bound to `visualViewport` resize and scroll. It is what docks the format bar above the software keyboard. |
+
+Two reasons this section gave for the absences were themselves wrong, and are
+worth correcting so they are not repeated as fresh justifications:
+
+- "There is no drafts endpoint" was false when written or shortly after. There
+  are three, listed above. `MailApiController` also documents the one thing a
+  client can get wrong with them: the id changes on every save, because JMAP
+  makes an Email immutable, so a client that keeps the first id piles up copies
+  in Drafts.
+- "`/api/mail/move` and `/api/mail/delete` each take one id, so archive 40 is 40
+  round trips" is still true of the endpoints, and it is now a documented cost
+  rather than a reason for absence. `mailbulk.js` runs six requests in flight and
+  puts the whole cost in one function, `each()`, so that when `MailService` and
+  `MailApiController` learn to take a list the only thing that changes is that
+  function's body. JMAP's `Email/set` takes a multi-key update map and would do
+  all forty in one call.
+
+**Still genuinely not built**, each with the file that would hold it:
+
+| Not built | Where it would go | Why |
+|---|---|---|
+| Swipe to archive or delete | `mail.js`, alongside the existing swipe handler on `.reader` | Section 8 requires every destructive action to confirm, and a confirm sheet interrupting a gesture is worse than a button. Note that a horizontal swipe on the reader DOES exist and is not this: `swipeToNeighbour()` moves to the next or previous message, replaces rather than pushes history, and is ignored on a laptop. It is not a stray to be removed. |
+| A custom edge-back gesture | `mail.js` | The platform gesture already works, because everything that means back calls `history.back()` (14.6). |
+| Pull to refresh | `mail.js` | Needs a non-passive `touchmove` fighting native overscroll, and Refresh is already a labelled 44px control in the header. |
+| Infinite scroll, virtualised list rendering | `mail.js` `renderList` and `.listfoot` | Load more already works and pages at 40. Nothing measured justifies replacing it. |
+| Conversation threading | `MailService` and `mail.js` | Not started. `i-thread` exists in the sprite and is unused; a spare symbol is not a half-built feature. |
+| A second floating FAB | `mail.html` | The Compose tab is the FAB (14.5). `.fab-in-pane` is Reply inside `.reader` and is the only other one. |
+| A phone drawer for the mailbox rail | `mail.html` | The account sheet replaces it, which is 14.2's whole fix. The CONSOLE does have a drawer, per section 11, and that is a different rail in a different file. |
+| Drag-to-dismiss on sheets | `mail.html` | Every sheet closes on Escape, on the scrim, on its close button and on back. |
+| Offline or `sessionStorage` caching of mail | `sw.js`, which deliberately never caches HTML | The original reason, that the mailbox is password-gated per session, is now weaker than it was: a device token can carry a sealed mailbox password across sessions for months (section 12). The decision stands on its own merits, but do not repeat that sentence as though it were still the whole argument. |
+| A light theme for the app chrome | `style.css` and `mail.html` | Section 2, which also says why the reader and preview frames are the exception and are not this. |
+| A separate phone template | `templates/` | One `mail.html` at every width. Two templates is two of every fix. |
 
 ### 14.10 Definition of done
 
@@ -1064,27 +1297,80 @@ fixture server, with a folder of at least 40 messages, and compare to
     `#tabbar`, `.bsheet .sheet` and `.backdrop` all report
     `transition-duration: 0s`; no rule in `mail.html` animates `width`,
     `height`, `top` or `left`; all three widths load with zero console errors
-    and zero failed requests; and `sw.js` `VERSION` differs from `'jm-v1'`.
+    and zero failed requests; and `sw.js` `VERSION` differs from whatever it held
+    before the change under test. It held `'jm-v1'` when this list was written and
+    holds `'jm-v6'` now, so the literal is worthless as a check; compare against
+    the previous commit.
 
 ### 14.11 Hand-off, outside the two owned files
 
-1. `static/sw.js`: bump `VERSION` from `'jm-v1'` in the same commit, or this
-   ships broken to exactly the people who installed the app.
-2. `templates/fragments/pwa.html`: unchanged. Its `black` status-bar style is
-   correct and only means the top inset is 0 in the installed iOS app, which
-   this layout already tolerates.
-3. `SecurityConfig.java:110-115`: the policy is `default-src 'self'; style-src
-   'self' 'unsafe-inline'`, so inline styles are legal, and `/logout` is a plain
-   `<a href>` while Spring Security's default logout is POST-only when CSRF is
-   on. Preserve the existing markup here and have whoever owns that file confirm
-   the link is not silently returning 405.
-4. `/app` keeps two contrast failures the audit found and this pass does not
-   touch: `#verifyExportBtn` at 3.39:1 and `tbody#campaignBody td.num` at
-   4.00:1.
-5. Console nav rows are `<div class="nav-item" data-view="...">` with no button,
-   role or tabindex, so they are unreachable by keyboard as well as parked
-   off-screen at 390px (sidebar scrollWidth 2275 against 390, 15 rows
-   unreachable). Section 11 is a separate pass and still owes it.
+All five are closed. Kept as the record, with what each one turned out to be.
+
+1. `static/sw.js`: `VERSION` was bumped and is bumped on every shipping change.
+   Closed.
+2. `templates/fragments/pwa.html`: unchanged, as intended. Its `black`
+   status-bar style is correct and only means the top inset is 0 in the installed
+   iOS app, which this layout already tolerates. Closed.
+3. **The Content-Security-Policy. The policy quoted here was never the deployed
+   one, and restoring it takes the console down.** See below. Closed, and the
+   `/logout` half is closed too: `SecurityConfig` now answers the plain `<a href>`
+   with `logoutRequestMatcher(new OrRequestMatcher(... GET "/logout", ... POST
+   "/logout"))`, and its comment records that the link previously slid past
+   `LogoutFilter` into a 404 rather than logging anybody out. Sign out is still
+   a link in the rail, in the account sheet and in the console; keep it that way.
+4. Both `/app` contrast failures are fixed. `#verifyExportBtn` is `.btn
+   .btn-primary`, white on `--primary` `#2f6fed`, which measures **4.55:1**
+   against the 4.5:1 body floor, was 3.39:1. `tbody#campaignBody td.num` inherits
+   `--text-dim` `#b9b9b9` on `--panel`, **8.31:1**, and the failed-count cell that
+   was the actual failure now paints `--danger-fg` `#f2776b` rather than
+   `--danger` `#e0483c`, **5.92:1** against 4.00:1 before. Section 14.7's rule
+   that `.mrow.danger` uses `--danger-fg` and never `--danger` is the same rule
+   and it now holds in `console.js` too. Closed.
+5. Console nav rows now carry `role="button"` and `tabindex="0"`, and the phone
+   drawer is built. Section 11 has the detail. Closed.
+
+#### The real Content-Security-Policy
+
+Quoted rather than paraphrased, from `SecurityConfig.java:442-450`, because
+paraphrasing it is what produced the entry above:
+
+```java
+.contentSecurityPolicy(csp -> csp.policyDirectives(
+        // The composer previews arbitrary customer HTML in a sandboxed
+        // iframe, so frame-src has to allow blob/data.
+        "default-src 'self'; " +
+        "img-src 'self' data: https:; " +
+        "style-src 'self' 'unsafe-inline'; " +
+        "script-src 'self' 'unsafe-inline'; " +
+        "frame-src 'self' blob: data:; " +
+        "object-src 'none'; base-uri 'self'; form-action 'self'"))
+```
+
+Three of those differ from what this document said, and each difference is
+load-bearing:
+
+- **`script-src 'self' 'unsafe-inline'`.** `console.html` carries **166 inline
+  event handler attributes** - 134 `onclick`, 17 `onchange`, 15 `oninput`.
+  Dropping `'unsafe-inline'` from `script-src` does not fail loudly: the page
+  loads, and every one of those 166 controls silently does nothing. Tightening
+  this is a real project that ports 166 handlers to delegated listeners first and
+  changes the header last, in that order, never the other way round.
+- **`img-src 'self' data: https:`.** Remote images in received mail and in
+  campaign creatives are shown once the reader asks for them. Section 0's "no
+  remote image" is about the application's own chrome, which loads none.
+- **`frame-src 'self' blob: data:`.** The composer previews customer HTML in a
+  sandboxed frame.
+
+The nested documents have their own, much tighter policies and they are not this
+one. `MailHtmlSanitizer` writes `default-src 'none'; img-src ...; style-src
+'unsafe-inline'; font-src data:; script-src '<sha256>'; object-src 'none';
+frame-src 'none'; form-action 'none'; base-uri 'none'` into the reader frame's
+`<meta>`. That single hashed `script-src` is the height reporter and nothing
+else; 14.8 has the account.
+
+The header block at the top of this document is written from the point of view
+of the box rendering with zero external requests, which is still true and is
+still the constraint. It is not a quotation of the header, and it was read as one.
 
 ---
 
@@ -1099,15 +1385,37 @@ rebuild existed to fix, arriving by a different route.
 
 | Layer | z-index | What lives here |
 |---|---|---|
-| content | 0 to 9 | the list, the reader, panels |
-| sticky chrome | 30 | sticky headers, table heads |
+| content | 0 to 9 | the list, the reader, panels, `.fab-in-pane` at 5 |
+| sticky chrome | 30 | sticky headers, table heads, the bulk bar `.jmb-wrap` |
+| console sidebar, desktop | 40 | `aside.sidebar`, fixed against the scrolling main |
+| console phone topbar | 45 | sticky, under the drawer it opens |
 | scrim (console drawer) | 60 | |
 | bottom tab bar | 60 | |
 | console nav drawer | 70 | over its own scrim |
-| install card | 100 | over the tab bar, under every dialog |
+| install card, notification permission card | 100 | over the tab bar, under every dialog |
+| session scrim | 140 | |
 | sheet scrim | 140 | |
 | sheets and modals | 150 | anything with `aria-modal="true"` |
+| popover from inside a sheet | 160 | the send-later menu, the bulk move menu |
+| update bar | 190 | see below |
 | toasts | 200 | above everything, never interactive |
+
+Four of those rows are additions made after the table was first written, and each
+one is recorded here rather than left as an unexplained number in a stylesheet:
+
+- **40 and 45** are the console shell, which predates the table and was simply
+  missing from it.
+- **160, a popover opened from inside a sheet.** The first consumer is the send
+  later menu, which opens from a button inside the compose sheet at 150; a
+  popover its own sheet paints over is a popover nobody can use. It stays under
+  toasts because a toast must never be covered and is never interactive. Both
+  `style.css` and `fragments/shortcuts.html` carry the same value and say so.
+- **190, the update bar** from `static/js/update.js`, which is the one entry that
+  sits above sheets. It is not an exception to the promotion rule below, because
+  it does not rely on stacking to behave: it tests for a visible
+  `[aria-modal="true"]` and stays down while one is open. A layer that outranks a
+  dialog and defers to it by measurement is the pattern to copy if another
+  ever needs to sit there.
 
 Rules that follow from it:
 
@@ -1120,3 +1428,70 @@ Rules that follow from it:
   opened from inside a sheet, it dispatches Escape and shows the card on the next
   frame, otherwise the card would paint underneath the sheet it was summoned from
   and the row would read as dead.
+
+---
+
+## 16. How this document is kept honest
+
+This section exists because the drift is the defect, not the individual stale
+sentence. Correcting the sentences once is worth doing and does nothing to stop
+the next round.
+
+The failure has a shape and it has now happened at least six times in here. A
+sentence describing what the code did on the day it was written stays in the
+present tense; the code moves; a diligent reader arrives, believes the sentence,
+and either deletes a working feature for not being in the spec or restores a
+setting the spec describes and takes a screen down. Section 14.9 alone claimed
+four shipped features were deliberately absent. Section 14.11 quoted a
+Content-Security-Policy that has never been the deployed one, at line numbers
+that have never held it, and 166 controls in `console.html` depend on the
+difference.
+
+### The two kinds of sentence
+
+Every line in here is one of two things, and the opening of this document says
+which way each settles a disagreement:
+
+- **A design rule.** "Tap targets are 44x44 minimum below 760px." Timeless,
+  argued from a reason, and binding on the code. If the code disagrees, the code
+  is wrong.
+- **A statement of fact about the code.** "The card is already built in
+  `pwa.js`." "There is no drafts endpoint." "`sw.js` VERSION is `'jm-v1'`." True
+  on a date, ages without warning, and binding on nobody. If the code disagrees,
+  **this document is wrong** and gets corrected, and the feature stays.
+
+Prefer the first. A rule that has to name a file, a line number, a version
+string or a count is a rule with an expiry date on it, and it should say so.
+
+### Two rules that make a stale fact catchable
+
+1. **A claim that something is deliberately absent must name the file that would
+   contain it.** "Push notifications: not built" cannot be checked without
+   reading the whole tree, so nobody checks it and it rots in place. "Push
+   notifications: would live in `static/js/notify.js`" is one `ls` away from
+   being disproved. 14.9 is written this way now. An entry that cannot name its
+   file is not yet a decision; it is an opinion about a feature nobody has
+   located.
+2. **Any statement about security policy quotes the code; it never paraphrases
+   it.** Headers, sandbox attributes, CSP directives, permission sets, session
+   scope. Paste the lines and name the file, as 14.11 does, so a reader can see a
+   difference rather than having to reconstruct one from prose. A paraphrase of a
+   header reads exactly like the header and is the one kind of error that gets
+   "fixed" back into the code by somebody being careful. If a policy is stated in
+   more than one place in this document, one of those places is going to be
+   wrong: state it once and cross-reference it everywhere else.
+
+### Three habits that follow
+
+- **Mark the shipped.** A section describing work that has landed says so at the
+  top, in bold, before the reader is thirty lines into a plan. Sections 10, 11,
+  12, 14 and 14.7 carry that line now.
+- **Keep the "before" numbers, retire the "current" ones.** 14.0's measured row
+  heights and 14.10's before-figures are the evidence for the design and stay
+  exactly as they are. A count of what exists today - 69 symbols, 8 glyphs,
+  `'jm-v1'` - is a different thing, and it either carries "at the time of
+  writing" or it does not belong in a specification.
+- **When a claim here turns out to be wrong, fix the claim in the same commit
+  that discovers it.** The four features in 14.9 were each found, doubted and
+  left alone by somebody, more than once, and the document was never touched. A
+  fact nobody corrects is a trap that has already been armed twice.

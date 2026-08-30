@@ -276,6 +276,7 @@ function applyState(next) {
   $('accountSheet').classList.toggle('open', UI.overlay === 'account');
   $('devicesSheet').classList.toggle('open', UI.overlay === 'devices');
   $('moreSheet').classList.toggle('open', UI.overlay === 'more');
+  $('outboxSheet').classList.toggle('open', UI.overlay === 'outbox');
   $('composeSheet').classList.toggle('open', UI.overlay === 'compose');
   /* Fetched on the transition rather than by whichever control opened the sheet,
      because a forward gesture back into this state pushes no control at all and
@@ -283,6 +284,18 @@ function applyState(next) {
      the list is worth re-reading: "last used" is a clock, and a list cached from
      ten minutes ago is a list that quietly lies about it. */
   if (UI.overlay === 'devices' && prev.overlay !== 'devices') loadDevices();
+  /* Same reasoning for the outbox, and one more of its own: what is in it is a
+     countdown. A sheet opened from a forward gesture on to a listing fetched
+     four minutes ago would show times that have already been and gone. */
+  if (UI.overlay === 'outbox' && prev.overlay !== 'outbox') loadOutbox(true);
+  if (prev.overlay === 'outbox' && UI.overlay !== 'outbox') {
+    OUTBOX.editing = null;
+    OUTBOX.confirming = null;
+  }
+  /* The schedule panel is a layer inside the compose sheet rather than a state in
+     this machine, so leaving the sheet has to take it off by hand or it is still
+     open, invisible, the next time compose is reached. */
+  if (prev.overlay === 'compose' && UI.overlay !== 'compose') closeSchedule(false);
   // Closing the composer files what is in it. popstate cannot be cancelled and a
   // save cannot be awaited from there, so the close is allowed to happen and the
   // request follows it; a failure leaves the composer's own state in memory and
@@ -294,6 +307,10 @@ function applyState(next) {
     dockToKeyboard();
   }
   $('foldersSheetTitle').textContent = UI.overlay === 'move' ? 'Move to folder' : 'Folders';
+  /* The folders sheet does two jobs from one list of rows, and the Outbox row
+     belongs to only one of them: nothing can be moved into the outbox, so the
+     row is not offered as a destination rather than being offered and refused. */
+  $('foldersSheet').dataset.mode = UI.overlay === 'move' ? 'move' : 'folders';
 
   // visibility:hidden is the portable half for older Android WebView; inert is
   // the half that keeps a parked pane out of the tab order everywhere else.
@@ -306,7 +323,7 @@ function applyState(next) {
   // Devices is reached through the You sheet and is a screen inside it, so the
   // You tab stays lit rather than the bar going blank on a state the person
   // walked into from there. Move does the same for Folders.
-  const TAB_FOR = { move: 'folders', devices: 'you' };
+  const TAB_FOR = { move: 'folders', devices: 'you', outbox: 'folders' };
   const active = reading ? '' : (TAB_FOR[UI.overlay] || UI.overlay || 'inbox');
   const tabs = $('tabbar').querySelectorAll('.tab');
   for (let i = 0; i < tabs.length; i++) {
@@ -329,6 +346,7 @@ function applyState(next) {
     loadMessages(true);
   }
   syncFocus(prev);
+  if (prev.overlay !== UI.overlay) outboxTick();
 }
 
 function focusSoon(el) {
@@ -411,7 +429,12 @@ window.addEventListener('popstate', function (e) {
 function placeChrome() {
   const phone = mqPhone.matches;
   (phone ? $('qPhone') : $('qDesk')).appendChild($('q'));
-  (phone ? $('sendHead') : $('sendFoot')).appendChild($('btnSend'));
+  /* The group and not the button. Send has a second half now, and the panel it
+     opens is positioned against the group, so moving the button on its own would
+     leave the schedule control and its panel behind in an empty slot. data-at is
+     what tells the panel which way there is room to open. */
+  (phone ? $('sendHead') : $('sendFoot')).appendChild($('sendGroup'));
+  $('sendGroup').dataset.at = phone ? 'head' : 'foot';
   // Both slots are inside .sheet-h. On a phone the compose footer is not on
   // screen at all, so an address parked there would be an address nobody sees;
   // under the title it is a caption of the thing it belongs to.
@@ -469,6 +492,7 @@ document.addEventListener('click', function (e) {
   if (retry === 'folders') { loadFolders(); return; }
   if (retry === 'messages') { loadMessages(true); return; }
   if (retry === 'devices') { loadDevices(); return; }
+  if (retry === 'outbox') { loadOutbox(true); return; }
   const what = t.getAttribute('data-do');
   if (what === 'refresh') refreshAll();
   else if (what === 'compose') openCompose();
@@ -503,6 +527,14 @@ function applyFolders(data) {
   const inbox = S.folders.find(f => f.role === 'inbox') || S.folders[0];
   if (inbox && !S.folderId) selectFolder(inbox.id, inbox.name, inbox.role);
   else if (S.folderId) loadMessages(true);
+
+  /* The one moment this file knows the mailbox is definitely open. The outbox is
+     asked for at boot as well, but a mailbox that was still locked then answered
+     409 and the feature would have stayed switched off for the rest of the
+     session: Send would quietly go back to leaving at once with no window in
+     front of it, which is the sort of difference nobody notices until they need
+     the window. */
+  if (!OUTBOX.available) loadOutbox(false);
 }
 
 /** The signed in address, in all four places that show it. */
@@ -544,7 +576,7 @@ function renderFolders() {
   badge.textContent = unread > 99 ? '99+' : String(unread);
   badge.hidden = unread <= 0;
 
-  const rows = S.folders.map(folderRow).join('');
+  const rows = S.folders.map(folderRow).join('') + outboxFoldRow();
   $('folders').innerHTML = rows;
   $('sheetFolders').innerHTML = rows;
   const archive = S.folders.find(f => f.role === 'archive');
@@ -2887,11 +2919,15 @@ function beaconDraft() {
   } catch (e) { /* nothing left to do from a page that is closing */ }
 }
 
-window.addEventListener('pagehide', beaconDraft);
+window.addEventListener('pagehide', () => { beaconDraft(); beaconDrafts(); });
 document.addEventListener('visibilitychange', () => {
   // hidden is the state a phone reaches when the app is switched away from, and
   // on iOS it is frequently the last state a page is ever in.
-  if (document.visibilityState === 'hidden') beaconDraft();
+  if (document.visibilityState === 'hidden') { beaconDraft(); beaconDrafts(); return; }
+  /* Coming back is the moment a failure from three in the morning is found. The
+     outbox has no permanent poll of its own, so this is the event that makes an
+     overnight failure visible without anybody going looking for it. */
+  if (OUTBOX.available) loadOutbox(false);
 });
 
 function renderDraftState(phase) {
@@ -3270,7 +3306,23 @@ function caretToStart() {
   ed.scrollTop = 0;
 }
 
-async function sendMessage() {
+/**
+ * Sends, or promises to send.
+ *
+ * sendAt is an ISO instant when this is a scheduled send and absent otherwise,
+ * and it is the only difference between the two: everything else about the
+ * message, the validation and the upload is identical, because a message the
+ * sender scheduled is not a different kind of message.
+ *
+ * Which endpoint it goes to is decided here and it decides what the 200 means.
+ * /api/mail/outbox/send answers once the message is safely in Postgres, which
+ * is what makes a window to stop it in possible; /api/mail/send answers once it
+ * has actually gone. The outbox is used whenever this server has one and is
+ * holding messages at all, and the older path is the fallback for a server whose
+ * outbox never answered, so an old deployment still sends rather than showing a
+ * broken button.
+ */
+async function sendMessage(sendAt) {
   if (S.sending) return;                       // a second tap must not start a second send
 
   // Refused here rather than by the server, because a mistyped address that only
@@ -3313,6 +3365,33 @@ async function sendMessage() {
     draftId: DRAFT.id || ''
   };
 
+  /* Held only while the outbox is both present and actually holding messages.
+     An operator who sets the window to zero has said they want sends to go
+     straight out, and routing through a queue that releases immediately would
+     add a round trip and an Undo button with no window behind it. */
+  const viaOutbox = OUTBOX.available && (!!sendAt || OUTBOX.undoSeconds > 0);
+  const url = viaOutbox ? '/api/mail/outbox/send' : '/api/mail/send';
+  if (viaOutbox) {
+    // Three parameters the outbox does not take. draftId is the important one:
+    // POST /send deletes the draft itself and the outbox does not, so this file
+    // deletes it instead, and only once the message can no longer come back.
+    delete fields.draftId;
+    delete fields.forwardOf;
+    delete fields.keepAttachments;
+    if (sendAt) fields.sendAt = sendAt;
+  }
+
+  /* Everything needed to put this message back on screen if it is stopped, taken
+     before the composer is cleared. Undo that handed back an empty sheet would
+     be a delete with a friendlier name. */
+  const snapshot = {
+    to: cTo.items.slice(), cc: cCc.items.slice(), bcc: cBcc.items.slice(),
+    subject: $('cSubject').value, html: written.html, text: written.text,
+    replyTo: COMPOSE.replyTo || '', forwardOf: COMPOSE.forwardOf || '',
+    keep: COMPOSE.keep.slice(), files: S.files.slice(),
+    draftId: DRAFT.id || '', savedAt: DRAFT.savedAt || null
+  };
+
   clearTimeout(DRAFT.timer);
   sendChrome(S.files.length ? 'Uploading' : 'Sending', 0, true);
   try {
@@ -3321,12 +3400,12 @@ async function sendMessage() {
       // No files, so nothing has changed about this request: the same urlencoded
       // form post through the same helper it has always used. The multipart path
       // below exists only when there is something to carry.
-      result = await post('/api/mail/send', fields);
+      result = await post(url, fields);
     } else {
       const form = new FormData();
       Object.keys(fields).forEach(k => form.append(k, fields[k] === null ? '' : fields[k]));
       S.files.forEach(f => form.append('files', f, f.name));
-      result = await upload('/api/mail/send', form, fraction => {
+      result = await upload(url, form, fraction => {
         // The last stretch is the server uploading to the mail server and filing
         // the copy in Sent, which no progress event covers, so the bar stops at
         // the honest number and the word changes instead of inventing movement.
@@ -3338,7 +3417,28 @@ async function sendMessage() {
     // file a draft for a message that has already gone out.
     clearCompose();
     if (UI.overlay === 'compose') history.back();
-    toast(result.message || 'Sent.');
+
+    if (viaOutbox && sendAt) {
+      // A scheduled send has no countdown to watch, so it says where the message
+      // now is and how to reach it rather than leaving a promise with no object.
+      toast('Scheduled. It goes ' + dayTime(new Date(result.sendAt || sendAt))
+        + ' and waits in Outbox until then.');
+      OUTBOX.bodies.set(String(result.id), snapshot);
+      // The draft goes now rather than in a week, and the snapshot stops naming
+      // it in the same breath: a message cancelled out of the outbox next
+      // Tuesday reopens from this snapshot, and a draft id pointing at a draft
+      // that was deleted on Monday would have the autosave writing to nothing.
+      dropDraft(snapshot.draftId);
+      snapshot.draftId = '';
+      loadOutbox(false);
+    } else if (viaOutbox) {
+      // No toast here on purpose: the bar IS the confirmation, and a toast beside
+      // it would be the same sentence twice in two different corners.
+      showUndoBar(result, snapshot);
+      loadOutbox(false);
+    } else {
+      toast(result.message || 'Sent.');
+    }
     // The draft this came from is destroyed by the send, so a Drafts folder on
     // screen is now one row out of date.
     if (S.folderRole === 'drafts') loadMessages(true);
@@ -3353,11 +3453,764 @@ async function sendMessage() {
   }
 }
 
+/* =========================================================================
+   The outbox: undo send, schedule send, and the queue itself
+
+   Sending stopped being one round trip when this block was added. A message
+   pressed Send on is written to Postgres and held there, and only then handed
+   to the mail server, which is what makes both of the features below possible
+   and is exactly what Gmail, Fastmail and Proton do. POST /api/mail/outbox/send
+   answers as soon as the message is safely queued; the older POST
+   /api/mail/send answers once it has gone, and it is still what this file uses
+   on a server whose outbox never answered, so nothing here can leave somebody
+   unable to send.
+
+   UNDO IS A DELAY AND NOT A RECALL, and every sentence in this block is written
+   on that footing. While the window is open the message is still in this
+   building and stopping it costs nothing. Once the window closes the control is
+   REMOVED rather than left to fail, because a button that looks like it can
+   bring a message back is a lie a person only discovers at the moment they most
+   needed it to be true.
+
+   Three numbers come from the server and none of them is repeated here as a
+   constant: the length of the hold, how many days ahead a message may be
+   scheduled, and how many hours ahead one carrying files may be. They are
+   properties of OutboxService and an operator can change any of them, so the
+   screen asks rather than assumes, and until it has an answer it does not
+   offer the feature at all.
+   ========================================================================= */
+
+const OUTBOX = {
+  /* Set true by the first successful read and never taken back. A read that
+     fails afterwards is a mail server having a bad minute, not a server that
+     has lost the feature, and dropping back to the immediate send path on a
+     transient failure would silently take Undo away mid morning. */
+  available: false,
+  ready: false,           // the first read has settled, either way
+  loading: false,
+  error: null,
+  undoSeconds: 0,
+  maxDaysAhead: 60,
+  attachmentHours: 24,
+  messages: [],
+  failures: 0,
+  timer: null,            // the refresh tick, running only while there is something to watch
+  editing: null,          // the queued id whose time editor is open
+  confirming: null,       // the queued id whose destructive confirm is open
+  busy: null,             // the queued id with a request in flight
+  announced: -1,          // the failure count this tab has already said out loud
+  /* What was actually composed, keyed by queued id.
+     The outbox listing carries a subject, the addresses and a state, and it
+     does NOT carry the body: there is no endpoint on this server that reads a
+     queued message's text back. So rescheduling a message means re-posting the
+     whole of it, and this is the only copy of the whole of it there is. Held in
+     memory for the life of the tab and deliberately not in localStorage: these
+     are letters about named patients, and a device somebody else can pick up is
+     the ordinary case in this organisation rather than the exception. The cost
+     is that a reload leaves a queued message cancellable but not editable, and
+     the row says so in words rather than hiding the control with no reason. */
+  bodies: new Map()
+};
+
+/* One live undo window per queued message. */
+const UNDO = new Map();
+
+/* ---------- reading ---------- */
+
+async function loadOutbox(loud) {
+  if (!can('MAIL_READ')) return;
+  if (OUTBOX.loading) return;
+  OUTBOX.loading = true;
+  if (loud) renderOutbox();
+  try {
+    const data = await api('/api/mail/outbox');
+    OUTBOX.available = true;
+    OUTBOX.error = null;
+    OUTBOX.messages = data.messages || [];
+    OUTBOX.failures = Number(data.failures || 0);
+    if (data.undoSeconds !== undefined) OUTBOX.undoSeconds = Number(data.undoSeconds) || 0;
+    if (data.maxDaysAhead) OUTBOX.maxDaysAhead = Number(data.maxDaysAhead);
+    if (data.attachmentHours) OUTBOX.attachmentHours = Number(data.attachmentHours);
+    forgetSettled();
+    announceFailures();
+  } catch (e) {
+    // A mailbox that is not open answers 409 here as it does everywhere else, and
+    // during boot handled() swallows it rather than stacking a second password
+    // prompt on the one status is already raising.
+    if (!handled(e)) OUTBOX.error = e.message;
+  } finally {
+    OUTBOX.loading = false;
+    OUTBOX.ready = true;
+    renderOutbox();
+    renderOutboxCounts();
+    outboxTick();
+  }
+}
+
+/* A snapshot is only worth keeping while the message it belongs to is still in
+   play. Anything the listing has stopped mentioning has gone out, been stopped
+   or been dismissed, and holding its text after that is holding a letter about
+   a patient in memory for no reason at all. */
+function forgetSettled() {
+  const live = new Set(OUTBOX.messages.map(m => String(m.id)));
+  OUTBOX.bodies.forEach((v, k) => { if (!live.has(String(k)) && !UNDO.has(String(k))) OUTBOX.bodies.delete(k); });
+}
+
+/* Said once per change and not on every poll, because a failure that arrived at
+   three in the morning must be announced when it is first seen and must not
+   then repeat every thirty seconds for the rest of the working day. The badge
+   is what keeps it visible afterwards. */
+function announceFailures() {
+  const now = OUTBOX.failures;
+  const was = OUTBOX.announced;
+  OUTBOX.announced = now;
+  // was < 0 is the first read this tab has done, and a failure found there is a
+  // failure that happened while nobody had this screen open, which is precisely
+  // the one worth saying out loud.
+  if (!now || (was >= 0 && now <= was)) return;
+  toast(now === 1
+    ? 'A message in your outbox did not go out. Open Outbox to see why.'
+    : now + ' messages in your outbox did not go out. Open Outbox to see why.', true);
+}
+
+/**
+ * The refresh tick.
+ *
+ * Deliberately not a permanent poll. notify.js already asks this server about
+ * this mailbox every forty five seconds, and a second unconditional loop beside
+ * it would double that for a queue that is empty almost all of the time. So it
+ * runs fast while the sheet is open, slowly while something is actually
+ * waiting, and not at all otherwise: an empty outbox is re-read when the tab is
+ * brought back to the front, when something is sent, and when the sheet is
+ * opened, which covers every way a row can appear.
+ */
+function outboxTick() {
+  clearTimeout(OUTBOX.timer);
+  if (!OUTBOX.available || document.hidden) return;
+  const open = UI.overlay === 'outbox';
+  const watching = OUTBOX.messages.length > 0 || OUTBOX.failures > 0 || UNDO.size > 0;
+  const ms = open ? 5000 : (watching ? 30000 : 0);
+  if (!ms) return;
+  OUTBOX.timer = setTimeout(() => loadOutbox(false), ms);
+}
+
+/* ---------- the counts a person sees without opening anything ---------- */
+
+/**
+ * The Outbox row, drawn into the same list as the folders.
+ *
+ * It is not a folder on the mail server and it is not in the folders answer, so
+ * it is appended here rather than merged into S.folders, which would put a
+ * fiction into the object the rest of this file treats as the server's truth.
+ */
+function outboxFoldRow() {
+  if (!OUTBOX.available) return '';
+  const failed = OUTBOX.messages.filter(m => m.state === 'FAILED').length;
+  const waiting = OUTBOX.messages.length - failed;
+  if (!waiting && !failed) return '';
+  const count = failed || waiting;
+  const label = 'Outbox, ' + (failed
+    ? failed + ' failed' + (waiting ? ' and ' + waiting + ' waiting' : '')
+    : waiting + ' waiting to go out');
+  return '<button type="button" class="fold" data-outbox="1" aria-label="' + esc(label) + '">'
+    + icon(failed ? 'i-warn' : 'i-schedule')
+    + '<span class="fname">Outbox</span>'
+    + '<span class="fb' + (failed ? ' bad' : '') + '">' + (count > 99 ? '99+' : count) + '</span>'
+    + '</button>';
+}
+
+/* Both surfaces from one call: the rail and the phone folders sheet already
+   share a string, and the tab badge is the same number said again for the one
+   screen where neither list is on show. */
+function renderOutboxCounts() {
+  renderFolders();
+  const failed = OUTBOX.messages.filter(m => m.state === 'FAILED').length;
+  const waiting = OUTBOX.messages.length - failed;
+  const badge = $('tabOutbox');
+  const count = failed || waiting;
+  badge.textContent = count > 99 ? '99+' : String(count);
+  badge.classList.toggle('bad', failed > 0);
+  badge.hidden = !count;
+}
+
+/* ---------- undo ---------- */
+
+/**
+ * The bar that appears after an ordinary send, and the countdown on it.
+ *
+ * The deadline is the server's and is translated onto this browser's clock by
+ * the distance between the two timestamps the same answer carried, rather than
+ * by trusting either clock on its own. A phone four minutes fast would
+ * otherwise show a window that had already closed, and one four minutes slow
+ * would keep offering Undo for four minutes after the message had gone.
+ */
+function showUndoBar(row, snapshot) {
+  const id = String(row.id);
+  const until = Date.parse(row.cancelUntil || row.sendAt || '');
+  const at = Date.parse(row.queuedAt || '');
+  const span = (isFinite(until) && isFinite(at) && until > at)
+    ? until - at
+    : Math.max(0, Number(row.undoSeconds || OUTBOX.undoSeconds || 0)) * 1000;
+
+  const el = document.createElement('div');
+  el.className = 'undo';
+  el.setAttribute('role', 'status');
+  el.dataset.undoId = id;
+  el.innerHTML = icon('i-clock')
+    + '<span class="ub"><span class="uh"></span>'
+    + '<span class="uw">It has not been sent yet. Undo stops it before it goes; '
+    + 'nothing can bring back a message that has already left.</span></span>'
+    + '<button class="btn sm" type="button" data-undo="' + esc(id) + '">Undo</button>';
+  $('undoBars').appendChild(el);
+
+  const rec = { id: id, deadline: Date.now() + span, node: el, timer: null,
+                snapshot: snapshot, busy: false };
+  UNDO.set(id, rec);
+  OUTBOX.bodies.set(id, snapshot);
+  measureUndoStack();
+
+  const paint = () => {
+    const left = Math.max(0, Math.ceil((rec.deadline - Date.now()) / 1000));
+    el.querySelector('.uh').textContent = left > 0
+      ? 'Sending in ' + left + 's'
+      : 'On its way';
+    if (left > 0) { rec.timer = setTimeout(paint, 250); return; }
+    // The window is closed, so the control goes rather than staying to fail.
+    windowClosed(rec);
+  };
+  paint();
+  outboxTick();
+}
+
+/**
+ * What happens at zero: the control is removed, the sentence changes to one
+ * that is true, and the draft the message was written in is finally thrown
+ * away. The draft survives the whole window on purpose, so that pressing Undo
+ * hands back a message with its draft still behind it rather than a composer
+ * with nothing to fall back on.
+ */
+function windowClosed(rec) {
+  const el = rec.node;
+  const btn = el.querySelector('.btn');
+  if (btn) btn.remove();
+  el.classList.add('went');
+  el.querySelector('.uh').textContent = 'On its way';
+  el.querySelector('.uw').textContent =
+    'It can no longer be stopped. Mail cannot be recalled once it has left this server.';
+  dropDraft(rec.snapshot && rec.snapshot.draftId);
+  rec.snapshot = null;
+  setTimeout(() => closeUndoBar(rec.id), 2600);
+  loadOutbox(false);
+}
+
+/**
+ * Takes one bar off, whether or not its record is still in the map.
+ *
+ * The node is found from the DOM rather than from the record on purpose. A bar
+ * that has already been settled has no reason to still be tracked, and an
+ * earlier version of this that returned early when the record was gone left the
+ * settled bar on screen for the rest of the session, stacked under the next
+ * one. Whoever is removed from the map, the node still has to go.
+ */
+function closeUndoBar(id) {
+  const key = String(id);
+  const rec = UNDO.get(key);
+  if (rec) {
+    clearTimeout(rec.timer);
+    UNDO.delete(key);
+  }
+  const node = $('undoBars').querySelector('[data-undo-id="' + key + '"]');
+  if (node) node.remove();
+  measureUndoStack();
+  outboxTick();
+}
+
+/* The phone puts the toasts and this stack in the same corner, and the rule
+   that moves the toasts up reads the height from here. Measured rather than
+   assumed, because the second line wraps to three on a narrow screen. */
+function measureUndoStack() {
+  const box = $('undoBars');
+  const h = box.firstChild ? Math.round(box.getBoundingClientRect().height) : 0;
+  if (h) document.body.style.setProperty('--undo-h', h + 'px');
+  else document.body.style.removeProperty('--undo-h');
+}
+
+async function undoSend(id) {
+  const key = String(id);
+  const rec = UNDO.get(key);
+  if (!rec || rec.busy) return;
+  rec.busy = true;
+  const btn = rec.node.querySelector('.btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Stopping'; }
+  try {
+    await post('/api/mail/outbox/cancel', { id: key });
+    clearTimeout(rec.timer);
+    rec.timer = null;
+    const back = rec.snapshot;
+    // Kept in the map until the bar itself goes, and left busy so nothing can act
+    // on it again. The draft is deliberately NOT dropped here: the message is
+    // back in the composer and the draft behind it is what makes closing that
+    // composer safe.
+    rec.snapshot = null;
+    rec.node.classList.add('stopped');
+    rec.node.querySelector('.uh').textContent = 'Stopped';
+    rec.node.querySelector('.uw').textContent = 'Nothing was sent. The message is back in the composer.';
+    if (btn) btn.remove();
+    setTimeout(() => closeUndoBar(key), 2600);
+    restoreComposed(back);
+    loadOutbox(false);
+  } catch (e) {
+    rec.busy = false;
+    if (handled(e)) return;
+    // The window closed between the tap and this request landing. The server's
+    // own sentence is used rather than one written here, because it is the one
+    // that knows which of the several late states the message reached.
+    clearTimeout(rec.timer);
+    windowClosed(rec);
+    toast(e.message, true);
+  }
+}
+
+/**
+ * Puts a stopped message back where it was written.
+ *
+ * Anything else would make Undo a delete. The files come back too: they were
+ * uploaded to the mail server when the message was queued and cancelling
+ * orphans those uploads, so sending again re-uploads them, which is the cost of
+ * being able to press Undo at all.
+ */
+function restoreComposed(snap) {
+  if (!snap) return;
+  openCompose({
+    to: snap.to, cc: snap.cc, bcc: snap.bcc,
+    subject: snap.subject, html: snap.html,
+    replyTo: snap.replyTo, draftId: snap.draftId, savedAt: snap.savedAt
+  });
+  COMPOSE.forwardOf = snap.forwardOf || null;
+  COMPOSE.keep = snap.keep || [];
+  S.files = snap.files || [];
+  renderFiles();
+  renderDraftState();
+  S.composeSeed = composeFingerprint();
+  DRAFT.seed = S.composeSeed;
+}
+
+/* The draft is only destroyed once the message it belongs to can no longer come
+   back. POST /api/mail/send deletes it server side; the outbox path does not,
+   so this is where it happens. A failure is ignored: a draft that outlived its
+   message is untidy, and a send that reported an error because of one would be
+   worse. */
+function dropDraft(id) {
+  if (!id) return;
+  post('/api/mail/draft/delete', { id: id }).catch(() => { /* already gone, or gone elsewhere */ });
+}
+
+/* A tab closed inside an undo window would otherwise leave the draft behind
+   forever, because nothing is left running to notice the window close. The
+   message itself is safe either way: it is in Postgres and the server sends it
+   with or without this browser. */
+function beaconDrafts() {
+  if (!UNDO.size || !navigator.sendBeacon) return;
+  UNDO.forEach(rec => {
+    const draftId = rec.snapshot && rec.snapshot.draftId;
+    if (!draftId) return;
+    const params = new URLSearchParams({ id: draftId, _csrf: csrfToken() });
+    try {
+      navigator.sendBeacon('/api/mail/draft/delete',
+        new Blob([params.toString()], { type: 'application/x-www-form-urlencoded' }));
+    } catch (e) { /* nothing left to do from a page that is closing */ }
+  });
+}
+
+/* ---------- times ---------- */
+
+/** The zone this browser is in, named, because a preset is meaningless without it. */
+function localZone() {
+  try {
+    const z = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (z) return z;
+  } catch (e) { /* an old engine with no Intl still gets the offset below */ }
+  const off = -new Date().getTimezoneOffset();
+  const sign = off < 0 ? '-' : '+';
+  const abs = Math.abs(off);
+  return 'UTC' + sign + String(Math.floor(abs / 60)).padStart(2, '0') + ':'
+    + String(abs % 60).padStart(2, '0');
+}
+
+/** "Today, 18:00", "Tomorrow, 08:00", "Mon 1 Sep, 08:00". */
+function dayTime(d) {
+  const now = new Date();
+  const days = Math.round(
+    (new Date(d.getFullYear(), d.getMonth(), d.getDate()) -
+     new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
+  const clock = d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
+  if (days === 0) return 'Today, ' + clock;
+  if (days === 1) return 'Tomorrow, ' + clock;
+  const day = d.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
+  return day + ', ' + clock;
+}
+
+/** "in 9 minutes", "in 14 hours", "in 3 days". Rounded down, never negative. */
+function inWords(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return 'in ' + s + ' second' + (s === 1 ? '' : 's');
+  const m = Math.round(s / 60);
+  if (m < 60) return 'in ' + m + ' minute' + (m === 1 ? '' : 's');
+  const h = Math.round(m / 60);
+  if (h < 36) return 'in ' + h + ' hour' + (h === 1 ? '' : 's');
+  const d = Math.round(h / 24);
+  return 'in ' + d + ' day' + (d === 1 ? '' : 's');
+}
+
+/** A Date as the local wall clock string a datetime-local input wants. */
+function toLocalField(d) {
+  const p = n => (n < 10 ? '0' : '') + n;
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+    + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+/* ---------- schedule send ---------- */
+
+/**
+ * How far ahead this particular message may be scheduled.
+ *
+ * Two ceilings, both the server's. The ordinary one is how long the queue will
+ * hold anything; the shorter one applies the moment a file is attached, because
+ * the mail server is holding those uploads for us unsent and nothing promises
+ * they will still be there next week. Enforced here as well as there so that a
+ * refusal arrives while somebody is still looking at the picker rather than
+ * after an upload they made on mobile data.
+ */
+function scheduleCeiling() {
+  const days = OUTBOX.maxDaysAhead;
+  const hours = OUTBOX.attachmentHours;
+  const carrying = S.files.length > 0 || COMPOSE.keep.length > 0;
+  const limit = carrying
+    ? Math.min(days * 24, hours)
+    : days * 24;
+  return { hours: limit, carrying: carrying, days: days, fileHours: hours };
+}
+
+function schedulePresets() {
+  const now = new Date();
+  const out = [];
+  const at = (addDays, h) => {
+    const d = new Date(now);
+    d.setDate(d.getDate() + addDays);
+    d.setHours(h, 0, 0, 0);
+    return d;
+  };
+  const evening = at(0, 18);
+  if (evening - now > 30 * 60000) out.push({ name: 'Later today', at: evening });
+  out.push({ name: 'Tomorrow morning', at: at(1, 8) });
+  out.push({ name: 'Tomorrow afternoon', at: at(1, 13) });
+  // Monday, unless tomorrow already is one, in which case the row above says it.
+  let ahead = (8 - now.getDay()) % 7;
+  if (ahead <= 1) ahead += 7;
+  out.push({ name: 'Monday morning', at: at(ahead, 8) });
+
+  const ceiling = scheduleCeiling();
+  const last = now.getTime() + ceiling.hours * 3600000;
+  return out.filter(p => p.at.getTime() > now.getTime() + 60000 && p.at.getTime() <= last);
+}
+
+function renderSchedulePanel() {
+  const ceiling = scheduleCeiling();
+  const now = new Date();
+  const rows = schedulePresets();
+  $('schedPresets').innerHTML = rows.length
+    ? rows.map(p => '<button class="sp-row" type="button" data-preset="' + esc(toLocalField(p.at)) + '">'
+        + '<span class="nm">' + esc(p.name) + '</span>'
+        + '<span class="tm">' + esc(dayTime(p.at)) + '</span></button>').join('')
+    : '<p class="sp-why">There is no preset inside the window this message can be held for. '
+      + 'Pick a time below.</p>';
+
+  const box = $('schedAt');
+  box.min = toLocalField(new Date(now.getTime() + 60000));
+  box.max = toLocalField(new Date(now.getTime() + ceiling.hours * 3600000));
+  if (!box.value && rows.length) box.value = toLocalField(rows[0].at);
+  scheduleWhy();
+}
+
+/**
+ * The sentence under the picker, which is the part that stops a message going
+ * out on the wrong morning: it names the zone the times on this panel are in
+ * and repeats the chosen moment back in full.
+ */
+function scheduleWhy(problem) {
+  const el = $('schedWhy');
+  el.classList.toggle('bad', !!problem);
+  if (problem) { el.textContent = problem; return; }
+  const ceiling = scheduleCeiling();
+  const chosen = $('schedAt').value ? new Date($('schedAt').value) : null;
+  const zone = 'Times here follow this device, which is set to ' + localZone() + '.';
+  const limit = ceiling.carrying
+    ? ' A message carrying files can only be scheduled ' + ceiling.fileHours
+      + ' hours ahead, because the mail server is holding those files for us unsent.'
+    : ' It can be scheduled up to ' + ceiling.days + ' days ahead.';
+  const goes = chosen && !isNaN(chosen)
+    ? ' It goes <b>' + esc(dayTime(chosen)) + '</b>, ' + esc(inWords(chosen - Date.now()))
+      + ', and waits in the outbox until then.'
+    : '';
+  el.innerHTML = esc(zone) + esc(limit) + goes;
+}
+
+function openSchedule() {
+  if (!OUTBOX.available) {
+    toast('This server has no outbox, so a message cannot be held for later. It can only be sent now.', true);
+    return;
+  }
+  renderSchedulePanel();
+  $('schedPop').hidden = false;
+  $('btnSchedule').setAttribute('aria-expanded', 'true');
+  focusSoon($('schedAt'));
+}
+
+function closeSchedule(refocus) {
+  $('schedPop').hidden = true;
+  $('btnSchedule').setAttribute('aria-expanded', 'false');
+  if (refocus) focusSoon($('btnSchedule'));
+}
+
+/**
+ * The picker's own Send. Scheduling is one gesture and not two: there is no
+ * armed state in which Send has silently changed meaning, because a Send button
+ * that quietly became a Schedule button is how a message goes out on Friday
+ * that somebody meant for Monday.
+ */
+function scheduleAndSend() {
+  const raw = $('schedAt').value;
+  const at = raw ? new Date(raw) : null;
+  if (!at || isNaN(at)) { scheduleWhy('Pick a date and a time first.'); return; }
+  if (at.getTime() <= Date.now() + 30000) {
+    scheduleWhy('That time has already passed. Pick a later one, or close this and send it now.');
+    return;
+  }
+  const ceiling = scheduleCeiling();
+  if (at.getTime() > Date.now() + ceiling.hours * 3600000) {
+    scheduleWhy(ceiling.carrying
+      ? 'A message carrying files can only be scheduled ' + ceiling.fileHours + ' hours ahead. Pick a nearer time.'
+      : 'This outbox holds a message for at most ' + ceiling.days + ' days. Pick a nearer time.');
+    return;
+  }
+  closeSchedule(false);
+  // An instant and not a wall clock reading, so nothing downstream has to guess
+  // which zone nine in the morning meant.
+  sendMessage(at.toISOString());
+}
+
+/* ---------- the outbox sheet ---------- */
+
+const OUTBOX_STATE = {
+  HELD: { pill: 'wa', word: 'Waiting' },
+  SENDING: { pill: 'nu', word: 'Going out' },
+  FAILED: { pill: 'nu', word: 'Failed' }
+};
+
+function outboxRow(m) {
+  const id = String(m.id);
+  const failed = m.state === 'FAILED';
+  const sending = m.state === 'SENDING';
+  const shape = OUTBOX_STATE[m.state] || OUTBOX_STATE.HELD;
+  const goes = m.sendAt ? new Date(m.sendAt) : null;
+  const known = OUTBOX.bodies.has(id);
+
+  const who = [m.to, m.cc, m.bcc].filter(Boolean).join(', ');
+  const files = (m.files || []).length;
+
+  // A row whose own moment has been and gone is stated as a moment in the past
+  // and not as a countdown. The sender loop only looks every couple of seconds,
+  // so "in 0 seconds" is a real state this listing can be caught in, and it
+  // reads as a stuck clock rather than as a message on its way out.
+  const late = !!goes && goes - Date.now() <= 0;
+  let line;
+  if (failed) line = 'It should have gone ' + fullWhen(m.sendAt)
+    + (m.attempts > 1 ? ', after ' + m.attempts + ' attempts' : '');
+  else if (sending) line = 'Going out now.';
+  else if (late) line = 'It was due ' + dayTime(goes) + '.';
+  else if (goes) line = (m.kind === 'SCHEDULED' ? 'Goes ' : 'Sending ')
+    + dayTime(goes) + ', ' + inWords(goes - Date.now());
+  else line = 'Waiting.';
+
+  let acts = '';
+  if (m.cancellable) {
+    acts = (known ? '<button class="btn sm" type="button" data-obedit="' + esc(id) + '">Change time</button>' : '')
+      + '<button class="btn sm" type="button" data-obcancel="' + esc(id) + '">Cancel</button>';
+  } else if (failed) {
+    acts = (known ? '<button class="btn sm" type="button" data-obagain="' + esc(id) + '">Write it again</button>' : '')
+      + '<button class="btn sm" type="button" data-obdismiss="' + esc(id) + '">Dismiss</button>';
+  }
+
+  // The one thing a row must never do is offer a control that will be refused,
+  // so a message past its own moment says what is happening instead.
+  const note = !m.cancellable && !failed
+    ? '<span class="onote">It is on its way out and can no longer be stopped.</span>'
+    : (m.cancellable && !known
+      ? '<span class="onote">The text of this one is not in this browser, so it cannot be '
+        + 'rescheduled from here. Cancel it and write it again to change the time.</span>'
+      : '');
+
+  const err = failed
+    ? '<span class="oerr">' + esc(m.error || 'It failed and nothing was delivered.') + '</span>'
+      + (known ? '' : '<span class="onote">Only the subject and the addresses are kept here. '
+        + 'The text cannot be read back through this screen.</span>')
+    : '';
+
+  const editor = '<div class="oedit">' + (OUTBOX.confirming === id
+    ? '<p class="why">' + (failed
+        ? 'Dismissing clears this from the outbox. Nothing is sent and nothing is recovered.'
+        : 'This stops the message. Nothing will be sent.') + '</p>'
+      + '<button class="btn sm pri" type="button" data-obyes="' + esc(id) + '">'
+      + (failed ? 'Dismiss it' : 'Stop it') + '</button>'
+      + '<button class="btn sm" type="button" data-obno="1">Keep it</button>'
+    : (OUTBOX.editing === id
+      ? '<div class="field"><label for="obAt' + esc(id) + '">New time</label>'
+        + '<input id="obAt' + esc(id) + '" type="datetime-local" data-obat="' + esc(id) + '"'
+        + ' min="' + esc(toLocalField(new Date(Date.now() + 60000))) + '"'
+        + ' max="' + esc(toLocalField(new Date(Date.now() + OUTBOX.maxDaysAhead * 86400000))) + '"'
+        + ' value="' + esc(goes ? toLocalField(goes) : '') + '"></div>'
+        + '<button class="btn sm pri" type="button" data-obsave="' + esc(id) + '">Move it</button>'
+        + '<button class="btn sm" type="button" data-obno="1">Keep the time</button>'
+        + '<p class="why">Files are not carried through a change of time. '
+        + 'A message with files has to be cancelled and written again.</p>'
+      : '')) + '</div>';
+
+  return '<div class="orow' + (failed ? ' failed' : '') + (OUTBOX.busy === id ? ' going' : '')
+    + (OUTBOX.editing === id ? ' editing' : '') + (OUTBOX.confirming === id ? ' confirming' : '')
+    + '" data-obrow="' + esc(id) + '">'
+    + icon(failed ? 'i-warn' : (sending ? 'i-send' : 'i-schedule'))
+    + '<div class="ometa">'
+    + '<span class="oname"><span class="nm">' + esc(m.subject || '(no subject)') + '</span>'
+    + '<span class="pill ' + shape.pill + '">' + esc(shape.word) + '</span></span>'
+    + '<span class="owhen">' + esc(line) + '</span>'
+    + '<span class="owho">To ' + esc(who || 'nobody')
+    + (files ? ', ' + files + ' file' + (files === 1 ? '' : 's') : '') + '</span>'
+    + err + note
+    + '</div>'
+    + '<div class="oacts">' + acts + '</div>'
+    + editor
+    + '</div>';
+}
+
+function renderOutbox() {
+  const box = $('outboxBody');
+  if (!box) return;
+  if (!OUTBOX.ready && OUTBOX.loading) { box.innerHTML = loadState('Reading the outbox'); return; }
+  if (OUTBOX.error && !OUTBOX.messages.length) { box.innerHTML = errState(OUTBOX.error, 'outbox'); return; }
+  if (!OUTBOX.messages.length) {
+    box.innerHTML = emptyState('i-schedule',
+      'Nothing is waiting to go out. A message you send is held here for a few seconds so it can '
+      + 'be stopped, and one you schedule waits here until its time.');
+    return;
+  }
+  box.innerHTML = '<div class="olist">' + OUTBOX.messages.map(outboxRow).join('') + '</div>'
+    + '<p class="obfoot">A message here has not been sent. Once it goes it cannot be recalled, '
+    + 'which is why everything on this screen acts before it leaves rather than after.</p>';
+}
+
+/* ---------- acting on a queued message ---------- */
+
+async function cancelQueued(id) {
+  const key = String(id);
+  if (OUTBOX.busy) return;
+  OUTBOX.busy = key;
+  OUTBOX.confirming = null;
+  renderOutbox();
+  try {
+    await post('/api/mail/outbox/cancel', { id: key });
+    const back = OUTBOX.bodies.get(key);
+    toast('That message was stopped. Nothing was sent.');
+    closeUndoBar(key);
+    if (back) { popThen(() => restoreComposed(back)); }
+  } catch (e) {
+    if (!handled(e)) toast(e.message, true);
+  } finally {
+    OUTBOX.busy = null;
+    loadOutbox(false);
+  }
+}
+
+async function dismissQueued(id) {
+  const key = String(id);
+  if (OUTBOX.busy) return;
+  OUTBOX.busy = key;
+  OUTBOX.confirming = null;
+  renderOutbox();
+  try {
+    await post('/api/mail/outbox/dismiss', { id: key });
+  } catch (e) {
+    if (!handled(e)) toast(e.message, true);
+  } finally {
+    OUTBOX.busy = null;
+    loadOutbox(false);
+  }
+}
+
+/**
+ * Moving a queued message to a different time.
+ *
+ * The whole message is re-posted, not the time on its own, because that is what
+ * /outbox/update takes: it cancels the row and writes a new one, so a request
+ * that named only a time would replace the letter with an empty one. The text
+ * comes out of the snapshot this file kept when the message was queued, which
+ * is why the control is only offered for a message this browser queued.
+ */
+async function rescheduleQueued(id) {
+  const key = String(id);
+  const snap = OUTBOX.bodies.get(key);
+  const field = document.querySelector('[data-obat="' + key + '"]');
+  if (!snap || !field) return;
+  const at = field.value ? new Date(field.value) : null;
+  if (!at || isNaN(at) || at.getTime() <= Date.now() + 30000) {
+    toast('Pick a time in the future.', true);
+    return;
+  }
+  // The shorter attachment ceiling is deliberately not applied here: /outbox/update
+  // does not carry files through an edit, so there are none to expire.
+  if (at.getTime() > Date.now() + OUTBOX.maxDaysAhead * 86400000) {
+    toast('This outbox holds a message for at most ' + OUTBOX.maxDaysAhead + ' days.', true);
+    return;
+  }
+  if (OUTBOX.busy) return;
+  OUTBOX.busy = key;
+  renderOutbox();
+  try {
+    const r = await post('/api/mail/outbox/update', {
+      id: key,
+      to: (snap.to || []).map(a => a.email).join(', '),
+      cc: (snap.cc || []).map(a => a.email).join(', '),
+      bcc: (snap.bcc || []).map(a => a.email).join(', '),
+      subject: snap.subject || '',
+      body: snap.text || '',
+      html: snap.html || '',
+      replyTo: snap.replyTo || '',
+      sendAt: at.toISOString()
+    });
+    // The id changes, because what is queued is a snapshot and a new snapshot is
+    // a new thing. The text has to be re-keyed onto it or the message this
+    // browser can still reschedule becomes one it cannot.
+    OUTBOX.bodies.delete(key);
+    if (r && r.id) OUTBOX.bodies.set(String(r.id), snap);
+    OUTBOX.editing = null;
+    toast('Moved. It now goes ' + dayTime(at) + '.');
+  } catch (e) {
+    if (!handled(e)) toast(e.message, true);
+  } finally {
+    OUTBOX.busy = null;
+    loadOutbox(false);
+  }
+}
+
 /* ---------- wiring ---------- */
 
 $('folders').addEventListener('click', e => {
   const b = e.target.closest('.fold');
-  if (b) selectFolder(b.dataset.id, b.dataset.name, b.dataset.role);
+  if (!b) return;
+  // The outbox is in this list and is not a folder, so it is answered first and
+  // never reaches selectFolder, which would ask the mail server for a folder id
+  // that does not exist.
+  if (b.dataset.outbox) { goOverlay('outbox'); return; }
+  selectFolder(b.dataset.id, b.dataset.name, b.dataset.role);
 });
 
 /* The same rows in the phone sheet, doing one of two jobs. Both close the sheet
@@ -3365,6 +4218,7 @@ $('folders').addEventListener('click', e => {
 $('sheetFolders').addEventListener('click', e => {
   const b = e.target.closest('.fold');
   if (!b || b.disabled) return;
+  if (b.dataset.outbox) { popThen(() => goOverlay('outbox')); return; }
   const id = b.dataset.id, name = b.dataset.name, role = b.dataset.role;
   if (UI.overlay === 'move') {
     // The folder it is already in is on this list too, marked as current. Say so
@@ -3411,7 +4265,8 @@ $('tabbar').addEventListener('click', e => {
   else if (tab === 'you') goOverlay('account');
 });
 
-['foldersSheet', 'accountSheet', 'devicesSheet', 'moreSheet', 'composeSheet'].forEach(id => {
+['foldersSheet', 'accountSheet', 'devicesSheet', 'moreSheet', 'outboxSheet',
+  'composeSheet'].forEach(id => {
   const el = $(id);
   el.addEventListener('click', e => {
     if (e.target === el || (e.target.closest && e.target.closest('[data-close]'))) history.back();
@@ -3445,7 +4300,77 @@ $('shDevices').addEventListener('click', () => goOverlay('devices'));
 $('shLock').addEventListener('click', () => popThen(lockMailbox));
 $('btnCancel').addEventListener('click', () => history.back());
 $('btnCancelTop').addEventListener('click', () => history.back());
-$('btnSend').addEventListener('click', sendMessage);
+/* An explicit arrow and not the function itself. sendMessage takes a time now,
+   and a click handler passed straight in would hand it the MouseEvent as one. */
+$('btnSend').addEventListener('click', () => sendMessage());
+
+/* ---------- outbox wiring ---------- */
+
+$('btnSchedule').addEventListener('click', () => {
+  if ($('schedPop').hidden) openSchedule();
+  else closeSchedule(true);
+});
+$('schedClose').addEventListener('click', () => closeSchedule(true));
+$('schedCancel').addEventListener('click', () => closeSchedule(true));
+$('schedSet').addEventListener('click', scheduleAndSend);
+$('schedAt').addEventListener('input', () => scheduleWhy());
+$('schedPresets').addEventListener('click', e => {
+  const b = e.target.closest('[data-preset]');
+  if (!b) return;
+  $('schedAt').value = b.dataset.preset;
+  scheduleWhy();
+});
+/* A click anywhere else on the sheet closes the panel, the way the contact menu
+   and the link row already behave. Not a document listener: the panel lives
+   inside the compose sheet and a document one would fire on the tap that opened
+   it. */
+$('composeSheet').addEventListener('click', e => {
+  if ($('schedPop').hidden) return;
+  if (e.target.closest('#schedPop') || e.target.closest('#btnSchedule')) return;
+  closeSchedule(false);
+});
+
+$('undoBars').addEventListener('click', e => {
+  const b = e.target.closest('[data-undo]');
+  if (b) undoSend(b.getAttribute('data-undo'));
+});
+
+$('obRefresh').addEventListener('click', () => loadOutbox(true));
+
+/* One delegated handler for the whole listing, because every row in it is
+   replaced on every refresh and a listener per button would be re-bound five
+   times a minute while the sheet is open. */
+$('outboxBody').addEventListener('click', e => {
+  const t = e.target.closest('[data-obedit],[data-obcancel],[data-obdismiss],'
+    + '[data-obagain],[data-obyes],[data-obno],[data-obsave]');
+  if (!t) return;
+  const edit = t.getAttribute('data-obedit');
+  if (edit) { OUTBOX.editing = edit; OUTBOX.confirming = null; renderOutbox(); return; }
+  const save = t.getAttribute('data-obsave');
+  if (save) { rescheduleQueued(save); return; }
+  // Cancel and dismiss both confirm first. Stopping a message destroys it, and
+  // dismissing a failure is the only record of it going away.
+  const stop = t.getAttribute('data-obcancel') || t.getAttribute('data-obdismiss');
+  if (stop) { OUTBOX.confirming = stop; OUTBOX.editing = null; renderOutbox(); return; }
+  if (t.getAttribute('data-obno')) {
+    OUTBOX.confirming = null;
+    OUTBOX.editing = null;
+    renderOutbox();
+    return;
+  }
+  const yes = t.getAttribute('data-obyes');
+  if (yes) {
+    const row = OUTBOX.messages.find(m => String(m.id) === String(yes));
+    if (row && row.state === 'FAILED') dismissQueued(yes);
+    else cancelQueued(yes);
+    return;
+  }
+  const again = t.getAttribute('data-obagain');
+  if (again) {
+    const back = OUTBOX.bodies.get(String(again));
+    if (back) popThen(() => restoreComposed(back));
+  }
+});
 $('btnUnlock').addEventListener('click', unlockMailbox);
 $('uPassword').addEventListener('keydown', e => { if (e.key === 'Enter') unlockMailbox(); });
 $('uRemember').addEventListener('change', syncUnlockKeep);
@@ -3531,6 +4456,7 @@ document.addEventListener('keydown', e => {
   // to dismiss a menu.
   if (!$('linkRow').hidden) { closeLinkRow(true); return; }
   if (!$('acMenu').hidden) { acClose(); return; }
+  if (!$('schedPop').hidden) { closeSchedule(true); return; }
   if (UI.overlay) history.back();
 });
 
@@ -3579,6 +4505,12 @@ if (!can('MAIL_SEND')) {
   if (window.MailSettings && typeof window.MailSettings.load === 'function') {
     window.MailSettings.load().catch(() => { /* no signature is a fine outcome */ });
   }
+
+  /* The outbox alongside them and for the same reason: Send has to know whether
+     there is a window in front of it before anybody presses it, and a message
+     that failed overnight has to be counted before the first screen is drawn.
+     Not awaited, and a server with no outbox simply leaves the feature off. */
+  loadOutbox(false);
 
   const status = await statusAsk;
   S.booting = false;

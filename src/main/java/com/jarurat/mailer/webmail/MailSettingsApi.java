@@ -7,6 +7,8 @@ import com.jarurat.mailer.models.MailboxSettings;
 import com.jarurat.mailer.repositories.MailboxSettingsRepository;
 import com.jarurat.mailer.services.AuditService;
 import jakarta.servlet.http.HttpSession;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
@@ -94,12 +96,50 @@ public class MailSettingsApi {
     private final JmapClient jmap;
     private final AuditService audit;
 
+    /**
+     * The outbox, asked one question: is there a hold in front of a send or not.
+     *
+     * Nullable, and null is a real answer rather than a mistake, because the
+     * four argument constructor below deliberately builds this class without an
+     * outbox. Nothing here calls into it except to read the two numbers it was
+     * configured with, so a null one means the same thing an absent one does:
+     * undo send is not happening.
+     */
+    private final OutboxService outbox;
+
+    /**
+     * Whether the outbox's background pass is switched on.
+     *
+     * Read from the property rather than from the service because OutboxService
+     * keeps it private and this class does not own that file. It matters: with
+     * autostart off, queueing still works and nothing ever leaves the queue, so
+     * an undo window would be a hold with no release and this screen must not
+     * describe it as a working feature.
+     */
+    private final boolean outboxRunning;
+
+    @Autowired
     public MailSettingsApi(MailboxSettingsRepository settings, MailboxAccess mailbox,
-                           JmapClient jmap, AuditService audit) {
+                           JmapClient jmap, AuditService audit, OutboxService outbox,
+                           @Value("${jarurat.mail.outbox.autostart:true}") boolean outboxRunning) {
         this.settings = settings;
         this.mailbox = mailbox;
         this.jmap = jmap;
         this.audit = audit;
+        this.outbox = outbox;
+        this.outboxRunning = outboxRunning;
+    }
+
+    /**
+     * The same class with no outbox behind it, which is what a settings screen on a
+     * build that has not wired one looks like: everything works and undo send
+     * reports itself as not happening. Kept as its own constructor rather than as a
+     * null argument at the call site so that reading it says which of the two
+     * situations you are in.
+     */
+    public MailSettingsApi(MailboxSettingsRepository settings, MailboxAccess mailbox,
+                           JmapClient jmap, AuditService audit) {
+        this(settings, mailbox, jmap, audit, null, false);
     }
 
     // ------------------------------------------------------------------ read
@@ -350,16 +390,33 @@ public class MailSettingsApi {
         out.put("defaultReply", row.getDefaultReply());
         out.put("requestReadReceipt", row.isRequestReadReceipt());
 
-        // Both of these are stored preferences with no consumer on the send path yet, and
-        // the screen has to be able to say so rather than promise a delay that will not
-        // happen. undoSend needs EmailSubmission sendAt, which is gated on the phase 0
-        // capability check; readReceipt needs a Disposition-Notification-To header that
-        // MailService does not write.
-        out.put("undoSendHonoured", false);
+        // Answered from the outbox rather than hard-coded, because it stopped being a
+        // constant the moment the mail screen started sending through it. A message now
+        // waits in Postgres for the window that outbox was configured with, and only then
+        // goes to the mail server, which is what every client offering Undo does. So
+        // this is true wherever that queue is running with a window in front of it,
+        // and false the moment somebody switches the pass off or sets it to zero.
+        //
+        // What it does NOT claim is that the number on this screen is the number of
+        // seconds you get. The window is one property for the whole mailer, in
+        // OutboxService, and the per-mailbox preference beside this flag has no reader
+        // on the send path; wiring it through means teaching that service to look a
+        // mailbox up, which is a file this class does not own. That gap is in the
+        // report rather than hidden behind a boolean that would have to mean two
+        // different things at once.
+        //
+        // The read receipt is untouched and still false: it needs a
+        // Disposition-Notification-To header that MailService does not write.
+        out.put("undoSendHonoured", undoSendHonoured());
         out.put("readReceiptHonoured", false);
 
         out.put("updatedAt", iso(row.getUpdatedAt()));
         return out;
+    }
+
+    /** Whether a send made from this mailbox is actually held before it goes. */
+    private boolean undoSendHonoured() {
+        return outbox != null && outboxRunning && outbox.undoSeconds() > 0;
     }
 
     /**

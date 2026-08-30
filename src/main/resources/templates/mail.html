@@ -899,6 +899,153 @@
            is holding, so it is drawn in the same list wearing a different word. */
         .frow.kept .sz{color:var(--text-faint);font-style:italic}
 
+        /* ============ the outbox: undo, schedule, and what is queued ============
+           One idea on three surfaces. A message does not leave the moment Send
+           is pressed any more: it waits in the outbox for a few seconds, or
+           until a time somebody picked, and these are the places that has to be
+           visible in.
+
+           The word Undo is doing dangerous work here, so the copy on every one
+           of these says what is actually happening. The message has not gone;
+           the control stops a send that has not started rather than recalling
+           one that has. Nothing here may imply otherwise, because the moment a
+           person needs that to be true is the worst possible moment to find out
+           it never was. */
+
+        /* ---- Send, and the half beside it that schedules ----
+           Two halves of one control rather than two buttons: the seam is a
+           single rule and the corners are squared where they meet, so the pair
+           reads as Send with an alternative and not as two primaries competing
+           for the same thumb. */
+        .sendgrp{display:inline-flex;position:relative}
+        .sendgrp #btnSend{border-top-right-radius:0;border-bottom-right-radius:0}
+        .sendgrp .sched{border-top-left-radius:0;border-bottom-left-radius:0;
+                        border-left:1px solid rgba(255,255,255,.30);padding:6px 9px}
+        .sendgrp .sched .ic{width:16px;height:16px}
+        .sendgrp .sched[aria-expanded="true"]{background:var(--primary-hover)}
+
+        /* ---- the schedule panel ----
+           Anchored to the group, and the group is a node that moves between the
+           compose footer and the compose header at 900px, so this opens upward
+           from one and downward from the other. data-at is written by
+           placeChrome, which is already the code that moves it. Which side it is
+           pinned to matters as much as which way it opens: .sheet clips, and a
+           panel that opened leftward from a button sitting against the left edge
+           of the footer would be cut in half. */
+        .schedpop{position:absolute;z-index:20;width:min(320px,calc(100vw - 32px));
+                  background:var(--panel);border:1px solid var(--border-strong);
+                  border-radius:var(--radius);box-shadow:var(--shadow-pop);overflow:hidden}
+        .schedpop[hidden]{display:none}
+        #sendGroup[data-at="foot"] .schedpop{bottom:calc(100% + 8px);left:0}
+        #sendGroup[data-at="head"] .schedpop{top:calc(100% + 8px);right:0}
+        .sp-h{display:flex;align-items:center;gap:8px;padding:9px 8px 9px 14px;
+              border-bottom:1px solid var(--border);background:var(--panel-2)}
+        .sp-h h4{margin:0;font-size:13px;font-weight:600}
+        .sp-b{padding:10px 12px 12px;max-height:min(54vh,400px);overflow-y:auto}
+        .sp-f{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--border);
+              background:var(--panel-2)}
+        .sp-f .btn{flex:1 1 auto}
+        /* Every preset prints the moment it resolves to beside its name. Monday
+           morning is the label somebody reads, and the date underneath it is the
+           only thing that stops a message going out on the wrong Monday. */
+        .sp-row{display:flex;align-items:center;gap:10px;width:100%;min-height:40px;
+                padding:6px 10px;margin-bottom:3px;border-radius:var(--radius-xs);
+                border:1px solid transparent;background:none;color:var(--text-dim);
+                font-size:13px;text-align:left;cursor:pointer;
+                -webkit-tap-highlight-color:transparent;
+                transition:background var(--t-fast),color var(--t-fast)}
+        .sp-row:hover{background:var(--panel-3);color:var(--text)}
+        .sp-row:active{background:var(--panel-3)}
+        .sp-row .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .sp-row .tm{flex:none;font-size:12px;color:var(--text-mute);white-space:nowrap;
+                    font-variant-numeric:tabular-nums}
+        .sp-row:hover .tm{color:var(--text-dim)}
+        .sp-sep{margin:8px 0 6px;font-size:11px;font-weight:600;letter-spacing:.04em;
+                text-transform:uppercase;color:var(--text-faint)}
+        .sp-why{margin:10px 0 0;font-size:11.5px;line-height:1.5;color:var(--text-mute)}
+        .sp-why b{color:var(--text-dim);font-weight:600}
+        .sp-why.bad{color:var(--danger-fg)}
+
+        /* ---- the undo bar ----
+           Bottom left on a laptop, where the toasts are bottom right, because
+           the two are different objects: a toast tells you something and leaves,
+           this one is a control with a deadline on it. On a phone there is only
+           one corner worth having, so the toasts move up out of its way by the
+           height this stack actually measured, which mail.js writes here. */
+        #undoBars{position:fixed;left:18px;bottom:18px;z-index:210;display:flex;
+                  flex-direction:column;gap:8px;max-width:min(400px,calc(100vw - 36px))}
+        .undo{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;
+              border-radius:var(--radius-xs);background:#2a2a2a;color:var(--text);
+              border:1px solid var(--border-strong);border-left:3px solid var(--warning);
+              box-shadow:var(--shadow-pop);animation:toast-in .18s cubic-bezier(.2,.9,.3,1)}
+        .undo > .ic{flex:none;margin-top:1px;color:var(--warning-fg)}
+        .undo.went{border-left-color:var(--success)}
+        .undo.went > .ic{color:var(--success-fg)}
+        .undo.stopped{border-left-color:var(--primary)}
+        .undo.stopped > .ic{color:var(--primary-fg)}
+        .undo .ub{flex:1;min-width:0}
+        .undo .uh{display:block;font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+        /* The second line is not decoration. Undo is the one word on this screen
+           a person can read as a recall, so the sentence that says it is not one
+           travels with it rather than being left to a help page. */
+        .undo .uw{display:block;margin-top:2px;font-size:11.5px;line-height:1.45;
+                  color:var(--text-mute)}
+        .undo .btn{flex:none;align-self:center}
+
+        /* ---- the outbox itself ----
+           Same row shape as the devices screen and for the same reason: a name,
+           a time, and one control that acts on it, with anything destructive
+           confirming on a second line rather than squeezing a second button in
+           beside a subject at 390px. */
+        .olist{display:flex;flex-direction:column;gap:8px}
+        .orow{display:grid;grid-template-columns:auto 1fr auto;column-gap:12px;align-items:start;
+              padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);
+              background:var(--panel-2)}
+        .orow > .ic{color:var(--text-mute);margin-top:3px}
+        /* A send that failed at three in the morning is the whole reason this
+           screen exists, so it does not look like a row that is merely waiting. */
+        .orow.failed{border-color:rgba(224,72,60,.45);background:rgba(224,72,60,.07)}
+        .orow.failed > .ic{color:var(--danger-fg)}
+        .orow.going{opacity:.5}
+        .ometa{min-width:0}
+        .oname{display:flex;align-items:center;gap:8px;font-size:13.5px;font-weight:600;
+               color:var(--text);line-height:18px}
+        .oname .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .owhen{display:block;margin-top:2px;font-size:12px;line-height:1.45;color:var(--text-dim);
+               font-variant-numeric:tabular-nums}
+        .owho{display:block;margin-top:1px;font-size:11.5px;line-height:1.4;color:var(--text-mute);
+              overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+        .oerr{display:block;margin-top:6px;font-size:12px;line-height:1.5;color:var(--danger-fg)}
+        .onote{display:block;margin-top:6px;font-size:11.5px;line-height:1.5;color:var(--text-mute)}
+        .oacts{display:flex;flex-direction:column;gap:6px;align-items:stretch}
+        .oacts .btn{white-space:nowrap}
+        .oedit{grid-column:1/-1;display:none;gap:8px;flex-wrap:wrap;align-items:flex-end;
+               margin-top:10px;padding-top:10px;border-top:1px solid var(--border)}
+        .orow.editing .oedit,.orow.confirming .oedit{display:flex}
+        .orow.editing .oacts,.orow.confirming .oacts{display:none}
+        .oedit .field{flex:1 1 190px;margin:0}
+        .oedit .why{flex:1 1 100%;margin:0;font-size:12px;line-height:1.5;color:var(--text-mute)}
+        .obfoot{margin-top:14px;padding-top:14px;border-top:1px solid var(--border);
+                font-size:12px;line-height:1.55;color:var(--text-mute)}
+        /* The outbox is not a folder on the mail server, so it is not in the
+           folders answer, and it is drawn into the same list anyway: this is
+           where a person looks for the message they just sent that has not gone
+           yet, and a second navigation for it would be a second place to miss. */
+        /* Nothing can be moved into the outbox, so the row is not offered as a
+           destination while that sheet is being a move target. applyState writes
+           data-mode; hiding it here rather than rendering two different strings
+           keeps one list of rows feeding both surfaces and both jobs. */
+        #foldersSheet[data-mode="move"] .fold[data-outbox]{display:none}
+        .fold .fb{font-size:10.5px;font-weight:700;padding:0 5px;border-radius:3px;flex:none;
+                  background:var(--warning);color:#191919;line-height:16px;
+                  font-variant-numeric:tabular-nums}
+        .fold .fb.bad{background:var(--danger);color:#fff}
+        /* Same shape as the unread badge on Inbox, a different colour, because
+           this one counts something that has not happened yet rather than
+           something that has arrived. */
+        .tab-badge.ob{background:var(--warning);color:#191919}
+        .tab-badge.ob.bad{background:var(--danger);color:#fff}
+
         /* ============ bottom tabs ============
            A direct child of <body> and nothing else. Anything position:fixed that
            lived inside .mail would be captured by the reader pane's transform,
@@ -1263,6 +1410,29 @@
                without touching that file. */
             #toasts{left:12px;right:12px;max-width:none;
                     bottom:calc(56px + env(safe-area-inset-bottom,0px) + 12px)}
+            /* One corner, two stacks. The undo bar takes the bottom of it because
+               it is the one with a deadline, and the toasts move up by the height
+               this stack actually measured rather than by a guess: --undo-h is
+               written by mail.js from the bar's own box, so a sentence that wraps
+               to three lines on a narrow phone still does not end up underneath a
+               toast. The fallback covers the frame before the measurement lands. */
+            #undoBars{left:12px;right:12px;max-width:none;
+                      bottom:calc(56px + env(safe-area-inset-bottom,0px) + 12px)}
+            body:has(#undoBars .undo) #toasts{
+                    bottom:calc(56px + env(safe-area-inset-bottom,0px) + 20px + var(--undo-h,72px))}
+            /* The schedule half of Send is a 44 square like everything else that
+               is tapped at this width, and it keeps Send's height by matching it. */
+            .sendgrp .sched{min-width:44px;padding:8px 12px}
+            .sp-row{min-height:48px}
+            /* The controls take a row of their own below the message rather than a
+               column beside it. Two 44px buttons in that column ate 200 of a 390
+               wide screen and the subject, which is the only thing that says
+               which message this is, ellipsised to four words. */
+            .orow{grid-template-columns:auto 1fr}
+            .oacts{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;margin-top:10px;
+                   padding-top:10px;border-top:1px solid var(--border)}
+            .oacts:empty{display:none}
+            .oacts .btn{flex:1 1 auto}
             body #jmInstall{bottom:calc(68px + env(safe-area-inset-bottom,0px))}
         }
 
@@ -1451,8 +1621,13 @@
         <span class="tab-ic"><svg class="ic" aria-hidden="true"><use href="#i-inbox"/></svg>
             <span class="tab-badge" id="tabUnread" hidden>0</span></span>
         <span class="tab-l">Inbox</span></button>
+    <!-- The outbox row lives in the folders sheet on a phone, so its count belongs
+         on the tab that opens it. A message that failed to go out at three in the
+         morning has to be countable from the first screen somebody looks at, and
+         this is the only badge on that screen with room for it. -->
     <button class="tab" type="button" data-tab="folders">
-        <span class="tab-ic"><svg class="ic" aria-hidden="true"><use href="#i-folder"/></svg></span>
+        <span class="tab-ic"><svg class="ic" aria-hidden="true"><use href="#i-folder"/></svg>
+            <span class="tab-badge ob" id="tabOutbox" hidden>0</span></span>
         <span class="tab-l">Folders</span></button>
     <button class="tab tab-fab" type="button" data-tab="compose" id="tabCompose">
         <span class="tab-ic"><svg class="ic" aria-hidden="true"><use href="#i-compose"/></svg></span>
@@ -1537,6 +1712,25 @@
             <button class="pib" type="button" data-close aria-label="Close">
                 <svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div>
         <div class="sheet-b" id="devicesBody"></div>
+    </div>
+</div>
+
+<!-- What is queued and what failed. The body is rendered by renderOutbox in
+     mail.js and owes the three states of section 9: a loading line, a designed
+     empty state, and an error that says what failed with a Retry that retries.
+     Opened from the Outbox row in the folder list, which renderFolders draws into
+     the rail and into the phone folders sheet from one string, so both entry
+     points and this sheet are wired in the same change. -->
+<div class="backdrop bsheet" id="outboxSheet">
+    <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="outboxTitle">
+        <span class="grab" aria-hidden="true"></span>
+        <div class="sheet-h">
+            <h3 id="outboxTitle">Outbox</h3><span class="spacer"></span>
+            <button class="pib" type="button" id="obRefresh" aria-label="Refresh the outbox">
+                <svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg></button>
+            <button class="pib" type="button" data-close aria-label="Close">
+                <svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+        <div class="sheet-b" id="outboxBody"></div>
     </div>
 </div>
 
@@ -1705,8 +1899,36 @@
                  and .lbl is what it says. sendMessage() writes to #sendLabel, never
                  to the button itself, because textContent on the button would take
                  the fill out with it. -->
-            <span class="qslot" id="sendFoot"><button class="btn pri" type="button" id="btnSend"><span
-                    class="fill" id="sendFill"></span><span class="lbl" id="sendLabel">Send</span></button></span>
+            <!-- #sendGroup is the node that moves between the footer and the header
+                 now, not #btnSend, because Send has a second half: the schedule
+                 control and the panel it opens are children of the group and are
+                 positioned against it, so moving the button alone would leave the
+                 panel anchored to an empty slot at one width and not the other. -->
+            <span class="qslot" id="sendFoot"><span class="sendgrp" id="sendGroup" data-at="foot"><button
+                    class="btn pri" type="button" id="btnSend"><span
+                    class="fill" id="sendFill"></span><span class="lbl" id="sendLabel">Send</span></button><button
+                    class="btn pri sched" type="button" id="btnSchedule" aria-label="Send later"
+                    aria-haspopup="dialog" aria-expanded="false" aria-controls="schedPop">
+                    <svg class="ic" aria-hidden="true"><use href="#i-schedule"/></svg></button>
+                <!-- Rendered by renderSchedulePanel in mail.js, which is also what
+                     fills in the presets: every one of them is a time relative to
+                     now, so a panel built at page load would offer yesterday
+                     morning to anybody who left the tab open overnight. -->
+                <div class="schedpop" id="schedPop" role="dialog" aria-labelledby="schedTitle" hidden>
+                    <div class="sp-h"><h4 id="schedTitle">Send later</h4><span class="spacer"></span>
+                        <button class="pib" type="button" id="schedClose" aria-label="Close">
+                            <svg class="ic" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+                    <div class="sp-b">
+                        <div id="schedPresets"></div>
+                        <div class="field"><label for="schedAt">Or pick a date and time</label>
+                            <input id="schedAt" type="datetime-local"></div>
+                        <p class="sp-why" id="schedWhy"></p>
+                    </div>
+                    <div class="sp-f">
+                        <button class="btn pri" type="button" id="schedSet">Schedule</button>
+                        <button class="btn" type="button" id="schedCancel">Cancel</button>
+                    </div>
+                </div></span></span>
             <button class="btn" type="button" id="btnCancel">Close</button>
             <span class="spacer"></span>
             <span class="muted hint">Sends through the jarurat.care mail server</span>
@@ -1758,6 +1980,10 @@
     </div>
 </div>
 
+<!-- Filled by showUndoBar in mail.js. A stack and not a single node, because two
+     messages sent eight seconds apart are two windows running at once and the
+     second one must not silently take the first one's control away. -->
+<div id="undoBars"></div>
 <div id="toasts"></div>
 
 <script th:inline="javascript">

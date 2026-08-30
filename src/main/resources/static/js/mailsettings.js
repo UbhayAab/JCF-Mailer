@@ -84,6 +84,25 @@
      goes quiet with no explanation and they conclude the feature is broken. */
   var pushExpiresAt = null;
 
+  /* The server's own diagnostic for push on this device, as jmNotify.state() last
+     answered it, or null before the first read and on any page without notify.js.
+
+     This is the field this sheet was missing and it is the reason this section could
+     not be trusted. Everything above is what the BROWSER believes: permission granted,
+     a subscription object exists. None of that can see the one failure that matters. A
+     notification is signed here and verified by Apple or Google against the key the
+     browser subscribed with, so if those two keys are not the same pair, every push is
+     refused with a 403, forever, and the browser is told nothing at all. The screen
+     would go on saying notifications are on while not one has ever arrived.
+
+     The server measures exactly that and has been answering with it on a call this
+     application already makes. Reading it is the whole of this addition.
+
+     Named for the server component that produces it rather than pushState, because
+     show() below calls history.pushState, and a bare pushState sitting beside that
+     would read as the browser API to somebody skimming this file in a year. */
+  var pushHealth = null;
+
   /* ------------------------------------------------------------------ tiny helpers */
 
   function copy(o) { var out = {}; for (var k in o) if (o.hasOwnProperty.call(o, k)) out[k] = o[k]; return out; }
@@ -97,6 +116,42 @@
       if (isNaN(d.getTime())) return String(iso);
       return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
     } catch (e) { return String(iso); }
+  }
+
+  /* How long ago something happened, in the words somebody would use out loud.
+     A failure two minutes old and one from last Tuesday call for completely
+     different reactions, and an ISO instant makes the reader do that arithmetic
+     at the exact moment they are already worried. Falls back to the raw value
+     rather than throwing, for the reason shortDate does. */
+  function ago(iso) {
+    try {
+      var then = Date.parse(iso);
+      if (!then) return String(iso);
+      var seconds = Math.round((Date.now() - then) / 1000);
+      if (seconds < 90) return 'just now';
+      var minutes = Math.round(seconds / 60);
+      if (minutes < 60) return minutes + (minutes === 1 ? ' minute ago' : ' minutes ago');
+      var hours = Math.round(minutes / 60);
+      if (hours < 36) return hours + (hours === 1 ? ' hour ago' : ' hours ago');
+      return 'on ' + shortDate(iso);
+    } catch (e) { return String(iso); }
+  }
+
+  /**
+   * A string the server wrote, made fit to sit in the middle of a paragraph.
+   *
+   * The server phrases its errors as fragments, because they were written to be
+   * logged: "the push service refused the request". Dropped straight into a sentence
+   * they read as a typo, and a screen that looks sloppy at the exact moment it is
+   * reporting a fault is a screen people stop believing. Capitalising and closing it
+   * is the whole of this, and it is idempotent, so a message the server already wrote
+   * as a sentence comes through untouched.
+   */
+  function sentence(text) {
+    var value = String(text === null || text === undefined ? '' : text).trim();
+    if (!value) return '';
+    value = value.charAt(0).toUpperCase() + value.slice(1);
+    return /[.!?]$/.test(value) ? value : value + '.';
   }
 
   function esc(s) {
@@ -348,12 +403,44 @@
           var st = api.state() || {};
           proved = !!st.pushProved;
           pushExpiresAt = st.pushExpiresAt || null;
+          // The same read feeds the diagnostic below the sentence this decides, so
+          // the two cannot end up describing the same device from two readings taken
+          // a moment apart.
+          pushHealth = st;
         }
         pushSubscribed = !!sub;
         pushReach = !!sub && proved;
         return pushReach;
       })
       .catch(function () { pushReach = false; pushSubscribed = false; return false; });
+  }
+
+  /**
+   * Re-reads both halves of the notification picture when the sheet opens.
+   *
+   * The server half is re-read rather than remembered because everything it reports
+   * moves while the sheet is shut: a delivery is refused, a registration lapses,
+   * somebody finally fixes a key. The person opening this sheet is opening it
+   * precisely because they want to know which of those happened, and answering from
+   * a reading taken at the last page load would be answering about this morning.
+   *
+   * The two halves are asked side by side rather than one behind the other, and that
+   * is a real failure being avoided rather than tidiness: navigator.serviceWorker.ready
+   * never settles at all on a page where no worker was ever registered, so chaining
+   * the server half behind checkPushReach would mean a browser that blocked the
+   * service worker never seeing the diagnostic either. They repaint independently and
+   * whichever answers first is drawn first. Neither is allowed to throw, and a
+   * notify.js older than this file simply has no refreshPush, which leaves the sheet
+   * exactly as it was rather than breaking it.
+   */
+  function refreshPush() {
+    checkPushReach().then(paintNotifyState);
+    var api = window.jmNotify;
+    if (!api || typeof api.refreshPush !== 'function') return Promise.resolve(null);
+    return api.refreshPush().then(function (st) {
+      if (st) pushHealth = st;
+      return st;
+    }).catch(function () { return null; });
   }
 
   /**
@@ -419,6 +506,19 @@
       + '.ms-state .ic{flex:none;margin-top:1px}'
       + '.ms-state.warn{border-color:var(--danger);color:var(--danger-fg);background:rgba(224,72,60,.09)}'
       + '.ms-state.on{border-color:var(--primary);color:var(--text)}'
+      /* Declared here rather than left to inherit. This class was already being
+         written into the lapse sentence by paintNotifyState and matched nothing,
+         so the aside it was meant to quieten rendered at exactly the weight of the
+         sentence it hangs off. */
+      + '.ms-state .ms-dim{color:var(--text-mute)}'
+      /* The failures the server kept. Quieter than the sentence above them because
+         they are evidence for it and not a second warning: a person who has read
+         "the push service is refusing these" needs the list to confirm it, not to
+         shout at them twice. */
+      + '.ms-fails{list-style:none;margin:8px 0 0;padding:0;font-size:11.5px;'
+      + 'line-height:16px;color:var(--text-mute)}'
+      + '.ms-fails li{padding:2px 0}'
+      + '.ms-fails .ms-when{color:var(--text-dim);font-weight:600}'
       /* The VIP list. A plain list of rows rather than chips, because each entry
          carries a checkbox of its own and a chip with a checkbox inside it is a
          44px tap target wrapped around two smaller ones. */
@@ -607,6 +707,216 @@
     list.innerHTML = html;
   }
 
+  /* What each failure the server kept was, in words rather than in the enum name it
+     records them under. The delivery kinds and the JMAP kinds sit in one table but
+     they are not the same sort of event, and the difference decides what a person
+     should do: a delivery kind is a notification that was built, signed, sent and
+     turned away, and a JMAP kind is the mail server declining to put this device on
+     its own list in the first place, which means nothing was ever sent at all.
+
+     Each one is a label rather than a sentence, and that is deliberate: the detail
+     the server sends with it is very often already a full sentence saying the same
+     thing, and two of those in a row reads as a stutter. The label says what sort of
+     event it was, the detail says what happened. */
+  var FAILURE_WORDS = {
+    REJECTED: 'refused by the push service',
+    GONE: 'the push service no longer knows this device',
+    RATE_LIMITED: 'rate limited by the push service',
+    TOO_LARGE: 'too big for the push service',
+    UNREACHABLE: 'the push service could not be reached',
+    DISABLED: 'no signing key, so nothing was sent',
+    JMAP_REGISTER: 'registering this device',
+    JMAP_RENEW: 'extending a registration',
+    JMAP_UNREGISTER: 'removing a registration',
+    JMAP_LAPSED: 'a registration expired',
+    BOOKKEEPING: 'recording a result'
+  };
+
+  /* The kinds above that mean something really was sent and turned away. Anything
+     not in here got no further than the mail server's own list. */
+  var REFUSAL_KINDS = {
+    REJECTED: 1, GONE: 1, RATE_LIMITED: 1, TOO_LARGE: 1, UNREACHABLE: 1, DISABLED: 1
+  };
+
+  /**
+   * The last few failures, as evidence under the sentence that interprets them.
+   *
+   * Three and not twenty. This is a symptom display and the server says so itself:
+   * past about three entries a person stops reading and starts scrolling, and the
+   * fourth identical 403 adds nothing the first one did not already say.
+   */
+  function failureList(items) {
+    if (!items || !items.length) return '';
+    var html = '<ul class="ms-fails">';
+    for (var i = 0; i < items.length && i < 3; i++) {
+      var failure = items[i] || {};
+      html += '<li><span class="ms-when">' + esc(ago(failure.at)) + '</span> '
+        + esc(FAILURE_WORDS[failure.kind] || 'something went wrong')
+        // The number, because whoever ends up fixing this needs it and because a
+        // 403 and a 429 call for completely different actions.
+        + (failure.status ? ' (' + esc(failure.status) + ')' : '')
+        + (failure.detail ? '. ' + esc(sentence(failure.detail)) : '')
+        + '</li>';
+    }
+    return html + '</ul>';
+  }
+
+  /**
+   * Whether push is actually delivering, said out loud, from the server's own
+   * measurements rather than from anything this browser believes.
+   *
+   * This exists because everything above it is the browser's opinion. Permission
+   * granted and a subscription object present are both true in the worst state this
+   * feature has, which is a signing key mismatch: the notification is built here,
+   * signed here, and refused by Apple or Google with a 403 because the browser
+   * subscribed against a different key. That fails forever, it fails silently, and
+   * from inside the browser it is indistinguishable from no mail having arrived.
+   *
+   * Every branch below is a field the endpoint already answers with, and every one
+   * ends in what the reader should do next, including the branch where the answer is
+   * that there is nothing to do. Nothing is inferred and nothing is rounded up. A
+   * field the server did not send leaves its branch untaken rather than being read
+   * as a no, which is why registered and verified are checked against true and false
+   * explicitly instead of for truthiness.
+   */
+  function pushDiagnostic() {
+    var st = pushHealth;
+    // No notify.js on this page, so there is nothing to report and nothing to guess
+    // from. Silence is the safe direction: the sentence above is true whatever push
+    // is or is not doing.
+    if (!st) return '';
+    // A browser with no push at all is already described by the sentence above, and
+    // a note here saying the server could not be asked would invent a fault out of
+    // a capability this browser never had.
+    if (!('PushManager' in window) || !navigator.serviceWorker) return '';
+
+    if (!st.pushConfigRead) {
+      /* Asked and not answered: a shut mailbox, a server that is not up, or the push
+         half not deployed. Said rather than left blank, because this is the screen
+         somebody opens when they think notifications are broken, and a blank space
+         under that question reads as a yes. */
+      return '<div class="ms-state">' + icon('i-info', 'ic-sm')
+        + '<span>The server could not be asked whether notifications are reaching this '
+        + 'device, so this cannot say. Open this again in a moment. If it keeps saying '
+        + 'the same thing, the mailbox is shut or the server is not answering.</span></div>';
+    }
+
+    /* Sorted before any of it is drawn, because the two sorts of failure lead to two
+       different sentences and mixing them under one heading is how a registration
+       problem gets read as a delivery problem and chased in the wrong place. */
+    var refusals = [];
+    var registrations = [];
+    var recent = st.pushRecentFailures || [];
+    var keyMismatch = false;
+    for (var i = 0; i < recent.length; i++) {
+      var failure = recent[i] || {};
+      if (REFUSAL_KINDS[failure.kind]) {
+        refusals.push(failure);
+        // 403 on a push send has one overwhelmingly likely cause and it is worth
+        // naming rather than leaving as a status code somebody has to look up.
+        if (failure.kind === 'REJECTED' && failure.status === 403) keyMismatch = true;
+      } else {
+        registrations.push(failure);
+      }
+    }
+
+    if (st.pushSupported === false) {
+      /* Nothing is sent at all in this state, so nothing can be refused and nothing
+         can register, which makes every branch below it moot. The server's own words
+         for why, because "push is disabled" is not something anybody can act on and
+         the reason usually names the setting that is missing. */
+      return '<div class="ms-state warn">' + icon('i-warn', 'ic-sm')
+        + '<span><strong>Notifications with everything closed are switched off on the '
+        + 'server.</strong> '
+        + (st.pushServerReason ? esc(sentence(st.pushServerReason)) + ' ' : '')
+        + 'Nothing on this device can change that, and turning anything on here will not '
+        + 'either. It needs whoever runs the mail server to set the signing key. Until '
+        + 'they do, notifications reach you only while Jarurat Mail is open '
+        + 'somewhere.</span></div>';
+    }
+
+    if (st.pushFailureCount > 0 || st.pushLastError || refusals.length) {
+      return '<div class="ms-state warn">' + icon('i-warn', 'ic-sm')
+        + '<span><strong>Notifications are being sent to this device and refused.</strong> '
+        + (st.pushFailureCount > 0
+            ? (st.pushFailureCount === 1
+                ? 'The last one was turned away. '
+                : st.pushFailureCount + ' in a row have been turned away. ')
+            : '')
+        + (st.pushLastError ? esc(sentence(st.pushLastError)) + ' ' : '')
+        + (keyMismatch
+            ? 'A refusal like that means one thing almost every time: the key this server '
+              + 'signs with and the key this browser subscribed with are not the same '
+              + 'pair. When they are not, every notification is refused in exactly this '
+              + 'way, forever, and nothing on the device is told. It cannot be fixed from '
+              + 'this screen or from this phone. Whoever runs the mail server has to put '
+              + 'the same key in both places; this device then registers itself again the '
+              + 'next time you open your mailbox.'
+            : 'Until that stops, nothing reaches this device with every window closed. '
+              + 'The wording above is the push service speaking, not us, and it is one '
+              + 'for whoever runs the mail server.')
+        + failureList(refusals)
+        + '</span></div>';
+    }
+
+    if (st.pushNewMailRegistered === true && st.pushNewMailVerified === false) {
+      /* The one distinction this section is named for. Registered and confirmed are
+         two facts and the gap between them is not a detail: the mail server holds an
+         unconfirmed registration and will not send to it, so the device is on a list
+         and is still never told anything. */
+      return '<div class="ms-state warn">' + icon('i-warn', 'ic-sm')
+        + '<span><strong>The mail server has this device on its list, but the '
+        + 'registration was never confirmed.</strong> Those are two different things and '
+        + 'the difference is the whole of it: an unconfirmed registration is one the mail '
+        + 'server will not send to, so new mail does not reach this device while every '
+        + 'window is closed. Reloading the mailbox runs the confirmation again, which '
+        + 'settles most of these. If this is still here afterwards, it is one for whoever '
+        + 'runs the mail server.'
+        + failureList(registrations)
+        + '</span></div>';
+    }
+
+    if (st.pushNewMailRegistered === false) {
+      return '<div class="ms-state warn">' + icon('i-warn', 'ic-sm')
+        + '<span><strong>The mail server has not taken the registration for this '
+        + 'device.</strong> This device is subscribed here, but the mail server is the '
+        + 'half that watches for new mail and posts it out, so with every window closed '
+        + 'nothing arrives. Reloading the mailbox offers it again. If this stays, it is '
+        + 'one for whoever runs the mail server.'
+        + failureList(registrations)
+        + '</span></div>';
+    }
+
+    if (st.pushNewMailRegistered === null || st.pushNewMailVerified === null) {
+      /* The server sends neither field when it holds no subscription for this device,
+         which is why this is a branch of its own rather than being folded into the
+         one above. It is not a fault; it is the state between granting permission and
+         the subscription being handed over. */
+      return '<div class="ms-state">' + icon('i-info', 'ic-sm')
+        + '<span>The server has no registration for this device yet, so nothing would '
+        + 'reach it with every window closed. One is offered the next time this page '
+        + 'loads with notifications on.</span></div>';
+    }
+
+    /* Everything checked, and nothing wrong. Said plainly, because the alternative
+       is showing nothing, and showing nothing is exactly what the broken states look
+       like from here. A person who came to this screen wondering whether push works
+       has to leave with an answer either way. */
+    return '<div class="ms-state on">' + icon('i-check', 'ic-sm')
+      + '<span><strong>Nothing is wrong at the server end.</strong> The mail server has '
+      + 'this device registered and confirmed, and nothing sent to it has been refused.'
+      + (st.pushCheckedAt ? ' Checked ' + esc(ago(st.pushCheckedAt)) + '.' : '')
+      /* The lapse date belongs to the sentence above when that one is showing it, and
+         to this one otherwise. Repeating a date twice in two adjacent boxes reads as
+         two different dates until somebody stops and compares them. */
+      + (st.pushExpiresAt && pushReach !== true
+          ? ' <span class="ms-dim">The registration lapses on '
+            + esc(shortDate(st.pushExpiresAt))
+            + ' unless you open your mailbox before then.</span>'
+          : '')
+      + '</span></div>';
+  }
+
   /**
    * The permission block, which is the only part of this sheet that is allowed to
    * refuse to draw a control.
@@ -677,6 +987,12 @@
         + '<br><button class="btn pri" type="button" id="msNotifyAsk" '
         + 'style="margin-top:10px">Turn on notifications</button></span></div>';
     }
+
+    /* Only under granted, and deliberately. Under any other answer the person's
+       blocker is the permission itself, and a note about what the mail server thinks
+       of a device it will never be allowed to reach is noise stacked on top of the
+       one instruction that matters. */
+    if (state === 'granted') html += pushDiagnostic();
 
     if (rules.quietNow) {
       html += '<div class="ms-state">' + icon('i-clock', 'ic-sm')
@@ -1121,7 +1437,7 @@
     // Asked every time the sheet opens rather than once at start, because a
     // subscription can appear or lapse between two visits and the sentence it decides
     // is the one claim on this screen that must never be stale.
-    checkPushReach().then(paintNotifyState);
+    refreshPush().then(paintNotifyState);
     paint();
     var first = $s('#msSig');
     if (first) requestAnimationFrame(function () { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } });
@@ -1138,8 +1454,25 @@
     if (sheet) sheet.classList.remove('open');
   }
 
-  window.addEventListener('popstate', function (e) {
-    if (open && !(e.state && e.state.mailSettings)) hide();
+  /* Reads history.state, NOT the event's state, and the difference is the whole sheet.
+   *
+   * Opening goes through mail.js's popThen, which calls history.back() and reopens from
+   * its own popstate handler. That handler is registered first, because mail.js loads
+   * first, so by the time this listener runs on the SAME event the sheet has already
+   * been shown and a new entry carrying mailSettings has already been pushed.
+   * e.state is the entry the browser popped, which predates that push and carries no
+   * flag, so testing it closed the sheet a moment after it opened, on every click, at
+   * every width.
+   *
+   * The cost of that one word was the entire file: this launcher is the only entry
+   * point, so the signature editor, out of office, the notification rules and the push
+   * diagnostic were all unreachable. Three separate authors wired work into this sheet
+   * and each verified it by calling open() directly rather than by clicking the row,
+   * so none of them saw it. history.state is what is true NOW, which is the question
+   * being asked. */
+  window.addEventListener('popstate', function () {
+    var now = history.state;
+    if (open && !(now && now.mailSettings)) hide();
   });
 
   /* ------------------------------------------------------------------ the launcher */

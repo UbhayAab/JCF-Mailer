@@ -149,7 +149,34 @@
             state: 'off',
             seen: false,
             endpoint: null,
-            expiresAt: null
+            expiresAt: null,
+            /* The diagnostic half of the same answer, which this file used to read
+               past and throw away.
+
+               It is kept because a VAPID key mismatch fails 403 forever and is
+               indistinguishable from nothing happening: the subscription exists, the
+               permission is granted, the screen says notifications are on, and not one
+               notification is ever delivered. None of that is observable from the
+               browser's own subscription. The server already measures it and already
+               answers with it on the call below, so the only thing missing was
+               somebody reading it. mailsettings.js draws it; this file's job is to
+               carry it across honestly and to keep it out of the poll's decisions,
+               which still turn on seen alone.
+
+               read stays false until a config answer has actually been parsed, so a
+               locked mailbox or an unreachable server is "we do not know" on the
+               screen rather than a clean bill of health. registered and verified are
+               null rather than false for the same reason: the server omits them
+               entirely when it holds no subscription for this device, and false would
+               claim the mail server refused something it was never offered. */
+            read: false,
+            reason: null,
+            registered: null,
+            verified: null,
+            failureCount: 0,
+            lastError: null,
+            recentFailures: [],
+            asOf: null
         },
         /* The mailbox pinned to this session, as the poll endpoint reports it.
            Read and never chosen: MailboxAccess pins it server side and no
@@ -998,6 +1025,55 @@
     }
 
     /**
+     * Takes one answer from the config endpoint apart, whichever call produced it.
+     *
+     * Both the GET and the POST hand back the same object, because PushApi builds
+     * every one of its four answers from a single state() method, so reading them
+     * in one place is the only way the two paths cannot drift into describing the
+     * device differently. The subscribe answer is the more valuable of the two
+     * here: it arrives the instant a subscription is made, which is the moment a
+     * key mismatch first becomes knowable.
+     *
+     * The capability half and the diagnostic half are absorbed under different
+     * rules on purpose. supported, key, state and seen decide whether the poll
+     * stands down, so they are only trusted when the server says it has a key to
+     * sign with; anything else must fail closed, because a poll that stopped for a
+     * push transport that cannot deliver would leave a person with no transport at
+     * all and nothing on screen saying so. The diagnostic half is taken whatever
+     * the answer says, because a server with push switched off is precisely the
+     * state the settings screen has to be able to describe.
+     */
+    function absorbPushConfig(cfg) {
+        if (!cfg) return S.push;
+        S.push.read = true;
+        S.push.reason = cfg.reason || null;
+        // Absent and false are different facts. The server omits these three
+        // entirely when it holds no subscription for this device, and hasOwnProperty
+        // is what keeps "we were never told" from being rendered as "the mail server
+        // said no", which would send somebody chasing a fault that does not exist.
+        S.push.registered = Object.prototype.hasOwnProperty.call(cfg, 'newMailRegistered')
+            ? !!cfg.newMailRegistered : null;
+        S.push.verified = Object.prototype.hasOwnProperty.call(cfg, 'newMailVerified')
+            ? !!cfg.newMailVerified : null;
+        S.push.failureCount = typeof cfg.failureCount === 'number' ? cfg.failureCount : 0;
+        S.push.lastError = cfg.lastError || null;
+        S.push.recentFailures = Array.isArray(cfg.recentFailures) ? cfg.recentFailures : [];
+        S.push.asOf = cfg.asOf || null;
+
+        if (!cfg.supported || !cfg.applicationServerKey) {
+            S.push.supported = false;
+            return S.push;
+        }
+        S.push.supported = true;
+        S.push.key = cfg.applicationServerKey;
+        S.push.emailPush = !!cfg.emailPush;
+        S.push.state = cfg.state || 'off';
+        S.push.seen = !!cfg.pushSeen;
+        S.push.expiresAt = cfg.expiresAt || null;
+        return S.push;
+    }
+
+    /**
      * Asks the server what push can do here.
      *
      * Every failure answers the same way, with supported false: a 404 because
@@ -1025,14 +1101,7 @@
             return res.json();
         }).then(function (cfg) {
             S.push.checked = true;
-            if (!cfg || !cfg.supported || !cfg.applicationServerKey) return S.push;
-            S.push.supported = true;
-            S.push.key = cfg.applicationServerKey;
-            S.push.emailPush = !!cfg.emailPush;
-            S.push.state = cfg.state || 'off';
-            S.push.seen = !!cfg.pushSeen;
-            S.push.expiresAt = cfg.expiresAt || null;
-            return S.push;
+            return absorbPushConfig(cfg);
         }).catch(function () {
             S.push.checked = true;
             return S.push;
@@ -1107,11 +1176,11 @@
                 if (!res.ok) return false;
                 return res.json().catch(function () { return null; });
             }).then(function (cfg) {
-                if (cfg) {
-                    S.push.state = cfg.state || S.push.state;
-                    S.push.seen = !!cfg.pushSeen;
-                    S.push.expiresAt = cfg.expiresAt || S.push.expiresAt;
-                }
+                // The same reader as the config call, so the two paths cannot come to
+                // different conclusions about the same device. This answer is the one
+                // that carries whether the mail server took the registration, which is
+                // the fact a person is owed within a second of turning this on.
+                absorbPushConfig(cfg);
                 tellWorker({ pushSeen: S.push.seen });
                 // The interval changes the moment a push has been proved, so the
                 // timer is re-armed rather than left to expire at the old rate.
@@ -1162,6 +1231,15 @@
             S.push.endpoint = null;
             S.push.seen = false;
             S.push.state = 'off';
+            // The diagnostic described a subscription that no longer exists, so it goes
+            // with it. Leaving a refusal note standing after somebody has deliberately
+            // switched notifications off would be reporting a fault in a feature they
+            // have just turned off, which is the fastest way to make a screen unreadable.
+            S.push.registered = null;
+            S.push.verified = null;
+            S.push.failureCount = 0;
+            S.push.lastError = null;
+            S.push.recentFailures = [];
             tellWorker({ pushSeen: false });
             schedule(interval());     // straight back to the full-rate poll
             return gone;
@@ -1279,6 +1357,26 @@
         enable: request,
         /** Turns push off for this device, at both ends. Safe to call twice. */
         disable: disablePush,
+
+        /**
+         * Re-reads the push diagnostic and resolves with the fresh state().
+         *
+         * Exported because the settings sheet needs it at the moment somebody opens
+         * that sheet, and bootPush ran once, possibly hours ago. Everything the
+         * diagnostic reports moves while the sheet is shut: a delivery is refused, a
+         * registration lapses, an operator fixes the key. A screen whose whole
+         * purpose is to say whether notifications are working must not answer from a
+         * reading taken at breakfast.
+         *
+         * A plain GET with no side effect, so it is safe to call on every open, and
+         * it never throws: a locked mailbox or an unreachable server leaves read
+         * false and the sheet says it does not know rather than inventing an answer.
+         */
+        refreshPush: function () {
+            return loadPushConfig()
+                .then(function () { return window.jmNotify.state(); })
+                .catch(function () { return window.jmNotify.state(); });
+        },
         /**
          * Everything a settings row needs to describe the true state, including
          * the three that are not a boolean: the browser has blocked us, this
@@ -1286,6 +1384,11 @@
          * never actually delivered anything. mailsettings.js owns that row and
          * this file does not draw one; what it can do is refuse to let that row
          * be written from a guess.
+         *
+         * It now also carries the server's own diagnostic, which used to be read
+         * off the wire and dropped. That was the difference between a settings
+         * screen that can say "the push service is refusing these" and one that
+         * can only say notifications are on while nothing arrives.
          */
         state: function () {
             return {
@@ -1302,6 +1405,28 @@
                 pushCarriesContent: S.push.emailPush,
                 pushProved: pushWorking(),
                 pushExpiresAt: S.push.expiresAt,
+
+                /* The diagnostic, under the endpoint's own names so that the mapping
+                   from what the server said to what the screen shows can be checked
+                   by reading two files rather than by guessing.
+
+                   pushConfigRead is first because every field under it is meaningless
+                   without it: false means no answer has been parsed, and a screen that
+                   treated that as healthy would be making exactly the claim this whole
+                   diagnostic exists to stop. Registered and verified are tri-state,
+                   null for a device the server holds no subscription for.
+
+                   pushServerReason is why the server has push switched off, in its own
+                   words. It is only ever set when supported is false. */
+                pushConfigRead: S.push.read,
+                pushServerReason: S.push.reason,
+                pushNewMailRegistered: S.push.registered,
+                pushNewMailVerified: S.push.verified,
+                pushFailureCount: S.push.failureCount,
+                pushLastError: S.push.lastError,
+                pushRecentFailures: S.push.recentFailures,
+                pushCheckedAt: S.push.asOf,
+
                 installRequired: needsInstall(),
                 pollEveryMs: interval()
             };

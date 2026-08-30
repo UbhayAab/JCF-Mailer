@@ -135,7 +135,13 @@
         .si-install-s { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text-dim); }
         .si-install-go { width: 100%; margin-top: 12px; min-height: 44px; }
         .si-about { margin: 16px 0 0; font-size: 12.5px; text-align: center; }
-        .si-about a { color: var(--text-mute); text-decoration: none; }
+        /* inline-flex with a 44px minimum, because this was 114 by 16 and is the only
+           control on the page under the floor. The text stays 12.5px and the hit area
+           grows around it, which is what section 8 asks for: pad the target, do not
+           grow the glyph. */
+        .si-about a { color: var(--text-mute); text-decoration: none;
+                      display: inline-flex; align-items: center; justify-content: center;
+                      min-height: 44px; padding: 0 12px; }
         .si-about a:hover { color: var(--text-dim); text-decoration: underline; }
 
         /* ---------- laptop ---------- */
