@@ -589,7 +589,10 @@ async function loadCampaigns() {
     + '<td class="num">' + num(c.opened) + ' <span style="color:var(--text-mute)">(' + c.openRate + '%)</span></td>'
     + '<td class="num">' + num(c.clicked) + ' <span style="color:var(--text-mute)">(' + c.clickRate + '%)</span></td>'
     + '<td class="num" style="color:' + (c.failed > 0 ? 'var(--danger-fg)' : 'inherit') + '">' + num(c.failed) + '</td>'
-    + '<td><button class="btn btn-sm">Open</button></td></tr>').join('')
+    + '<td><button class="btn btn-sm">Open</button>'
+      + (c.status === 'SCHEDULED' && can('CAMPAIGNS_SEND')
+          ? '<button class="btn btn-sm btn-danger" onclick="cancelSchedule(event, ' + c.id + ')">Unschedule</button>'
+          : '') + '</td></tr>').join('')
     : emptyState(9, 'i-campaign', 'No campaigns yet. A campaign is one message to one list.',
         can('CAMPAIGNS_WRITE') ? actionBtn('New campaign', 'openCampaignKind()', true) : '');
 }
@@ -890,10 +893,22 @@ function showComposerLock(status) {
     const host = $('view-composer');
     host.insertBefore(bar, host.firstChild.nextSibling || host.firstChild);
   }
+  // SCHEDULED is the one locked status that has not actually sent anything, so it is
+  // the one where "duplicate it" is the wrong and only answer. Unscheduling puts the
+  // campaign back to DRAFT and hands the original back, editable.
+  const pending = String(status).toUpperCase() === 'SCHEDULED';
   bar.innerHTML = '<b>This campaign is ' + esc(String(status).toLowerCase()) + ', so it can no longer be edited.</b>'
-    + '<span style="opacity:.85">You can still preview it, send yourself a test, and read its results.</span>'
-    + '<button class="btn" id="composerDuplicate" style="margin-left:auto">Duplicate to edit</button>';
+    + '<span style="opacity:.85">' + (pending
+        ? 'Nothing has been sent yet. Unschedule it to put it back to a draft you can change.'
+        : 'You can still preview it, send yourself a test, and read its results.') + '</span>'
+    + (pending && can('CAMPAIGNS_SEND')
+        ? '<button class="btn btn-danger" id="composerUnschedule" style="margin-left:auto">Unschedule</button>'
+          + '<button class="btn" id="composerDuplicate">Duplicate to edit</button>'
+        : '<button class="btn" id="composerDuplicate" style="margin-left:auto">Duplicate to edit</button>');
   $('composerDuplicate').onclick = duplicateCampaign;
+  if ($('composerUnschedule')) {
+    $('composerUnschedule').onclick = e => cancelSchedule(e, currentCampaignId);
+  }
 }
 
 /** Copies a locked campaign into a fresh draft so the wording can be reused. */
@@ -1310,18 +1325,433 @@ async function sendTest() {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-async function sendCampaign() {
-  if (composerEditable && !(await saveCampaign(false))) return;
-  const list = listCache.find(l => String(l.id) === String($('cList').value));
-  if (!list) { toast('Choose an audience list first', 'warn'); return; }
-  if (!confirm('Send "' + $('cName').value.trim() + '" to ' + list.mailable
-      + ' recipients on "' + list.name + '"?\n\nThis cannot be undone.')) return;
+/* The click that used to send now opens the report. The checks themselves are
+   not new and never were optional: CampaignService calls assertSafeToSend and a
+   blocked campaign throws before one message leaves. What reached the screen was
+   one sentence in a red toast, after the click, naming the first blocker and
+   nothing else, with no way to act on it. */
+async function sendCampaign() { return showSafetyModal(true); }
 
+/* =========================================================================
+   Pre-send checks
+   =========================================================================
+   SafetyCheckService was half wired and it was the wrong half. The send path
+   called assertSafeToSend, so a dangerous send was refused; check(), the report
+   that says which rule failed, and dropSuppressedQueued(), the only thing that
+   clears a SUPPRESSED_QUEUED block, sat behind endpoints nothing called. A
+   person was stopped and never told what to fix, and the one documented way out
+   could not be reached from any screen. This section is the missing half.
+
+   Blockers, warnings and notes stay three lists and never merge. They need
+   three different responses: a blocker has to be acted on before anything goes
+   out, a warning is a judgement the sender makes, a note is neither. */
+
+/* The service compares the measured rates against these and does not put them
+   in facts(), so a report can print a rate but not the line it is measured
+   against, and a percentage with no line beside it tells nobody anything. These
+   four are the @Value defaults in SafetyCheckService, and nothing in
+   application.properties sets mailer.safety.*, so today they are the live
+   values. If someone sets those properties this copy goes stale in silence,
+   which is why each rate row also prints the service's own sentence whenever a
+   finding fires: the two numbers sit together and a drift is visible. */
+const SAFETY_LIMITS = {
+  bounceWarnPct: 2.0, bounceBlockPct: 5.0,
+  complaintWarnPct: 0.1, complaintBlockPct: 0.5
+};
+
+/* A finding that only names the problem leaves the reader exactly where they
+   started. Each known code carries the next move, and where this console can
+   make that move the row carries the control as well. Codes with no fix inside
+   this application, an SES shutdown or a disabled account, get the sentence and
+   no button, because a control that cannot help is worse than none. An
+   unrecognised code renders with its message alone rather than with invented
+   advice, so a rule added to the service later degrades quietly. */
+const SAFETY_ACTIONS = {
+  LIST_MISSING: { what: 'Pick the audience in step 3 of the composer.',
+                  label: 'Choose a list', call: "safetyFocus('cList')" },
+  LIST_DELETED: { what: 'That list is gone. Point this campaign at another one in step 3.',
+                  label: 'Choose a list', call: "safetyFocus('cList')" },
+  AUDIENCE_EMPTY: { what: 'Nobody on this list can be mailed. Import a fresh audience in step 3 '
+                        + 'or point the campaign at another list.',
+                    label: 'Choose a list', call: "safetyFocus('cList')" },
+
+  /* The service's own message ends "Re-queue the audience before sending", and
+     the repository says twice that re-queueing is exactly what does not clear
+     this: those rows already exist, so a requeue steps over them. The server
+     sentence is still printed above, because it carries the count and the sample
+     addresses, and rewriting a server message here would hide a real defect in
+     it. The correction sits under it, next to the button that does work. */
+  SUPPRESSED_QUEUED: { what: 'Re-queueing does not clear this. Those rows already exist, so a requeue '
+                           + 'steps over them and the block survives it. Dropping them marks them SKIPPED, '
+                           + 'which is what the send loop would have done had it reached them, and they '
+                           + 'stay off this campaign.',
+                       label: 'Drop these recipients', call: 'dropSuppressedRecipients()',
+                       danger: true, id: 'safetyDropBtn' },
+
+  SUBJECT_MISSING: { what: 'Write the subject line in step 1.',
+                     label: 'Open step 1', call: "safetyFocus('cSubject')" },
+  BODY_MISSING: { what: 'Paste the email HTML in step 2.',
+                  label: 'Open the body', call: "safetyFocus('cHtml')" },
+  UNSUBSCRIBE_MISSING: { what: 'Marketing mail has to carry a way out. Put {{UNSUBSCRIBE_LINK}} in the '
+                             + 'body where the footer belongs.',
+                         label: 'Open the body', call: "safetyFocus('cHtml')" },
+
+  QUOTA_EXCEEDED: { what: 'SES will not accept this many messages today. Schedule the send for after the '
+                        + 'quota resets, or send to a smaller list first.',
+                    label: 'Schedule instead', call: 'safetySchedule()' },
+
+  DOMAIN_NOT_VERIFIED: { what: 'Nothing can leave until the sending domain is verified. Publish the DNS '
+                             + 'records on the Domains screen and run these checks again.',
+                         label: 'Open Domains', call: "safetyGoTo('domains')", perm: 'MAILBOX_MANAGE' },
+
+  SES_SENDING_DISABLED: { what: 'Nothing on this screen can switch sending back on. That is an AWS account '
+                              + 'state: open a case in the SES console, then run these checks again.' },
+  SES_SHUTDOWN: { what: 'AWS has stopped sending on this account. It has to be answered in the SES console, '
+                      + 'and no campaign goes out until it is lifted.' },
+
+  BOUNCE_RATE_HIGH: { what: 'Verify the list and send to the clean export rather than the raw list. The rate '
+                          + 'is measured across the whole account, so every campaign carries it until it '
+                          + 'comes down.',
+                      label: 'Open verification', call: "safetyGoTo('verify')", perm: 'VERIFICATION_RUN' },
+  VERIFIED_BOUNCE_RISK_HIGH: { what: 'The verifier expects this list to bounce. Export the clean addresses '
+                                   + 'and send to those.',
+                               label: 'Open verification', call: "safetyGoTo('verify')", perm: 'VERIFICATION_RUN' },
+  /* No button. A complaint rate is not fixed by a control, it is fixed by mailing
+     different people less often, and offering a button here would suggest
+     otherwise. */
+  COMPLAINT_RATE_HIGH: { what: 'Stop sending to this audience until it comes down. Complaints mean people '
+                             + 'who did not want the mail got it, so the question is who is on the list and '
+                             + 'how long since they last heard from us, not which button to press.' },
+
+  COLD_AUDIENCE: { what: 'Send a few hundred first and read the bounces before committing the rest.' },
+  QUOTA_TIGHT: { what: 'Transactional mail shares this quota. Consider scheduling the campaign for off '
+                     + 'hours so a receipt is not queued behind it.',
+                 label: 'Schedule instead', call: 'safetySchedule()' },
+  SES_SANDBOX: { what: 'Request production access in the SES console. Until then only verified addresses '
+                     + 'receive anything, so a send looks successful and reaches almost nobody.' },
+  SES_ENFORCEMENT: { what: 'Read the reputation dashboard in the SES console before sending more volume.' },
+  SES_UNREACHABLE: { what: 'Quota and sending state could not be read, so this report cannot promise the '
+                         + 'send will be accepted. The send path checks again and refuses on its own.' },
+  DKIM_NOT_READY: { what: 'Publish the DKIM records on the Domains screen. Gmail and Yahoo require signed '
+                        + 'mail from bulk senders, and unsigned mail is filtered.',
+                    label: 'Open Domains', call: "safetyGoTo('domains')", perm: 'MAILBOX_MANAGE' },
+  MAIL_FROM_NOT_READY: { what: 'Publish the MX and SPF records for the custom MAIL FROM domain on the '
+                             + 'Domains screen so SPF aligns to our own domain.',
+                         label: 'Open Domains', call: "safetyGoTo('domains')", perm: 'MAILBOX_MANAGE' },
+  DOMAIN_UNVERIFIABLE: { what: 'The domain state could not be read. Try again, and check the Domains screen '
+                             + 'if it keeps failing.',
+                         label: 'Open Domains', call: "safetyGoTo('domains')", perm: 'MAILBOX_MANAGE' },
+  REPLY_TO_INVALID: { what: 'Fix the reply-to address in step 1, or clear it and let replies go to the from '
+                          + 'address.',
+                      label: 'Open step 1', call: "safetyFocus('cReplyTo')" },
+  OVER_GMAIL_CLIP: { what: 'Trim the body in step 2. Anything past the cut hides behind a "view entire '
+                         + 'message" link, and the unsubscribe footer is usually what falls off the end.',
+                     label: 'Open the body', call: "safetyFocus('cHtml')" },
+  UNBALANCED_MERGE_TAGS: { what: 'Find the mistyped tag in step 2 before it ships as literal text.',
+                           label: 'Open the body', call: "safetyFocus('cHtml')" },
+  INSECURE_LINKS: { what: 'Change the http:// links in step 2 to https://.',
+                    label: 'Open the body', call: "safetyFocus('cHtml')" },
+  IMAGE_ONLY: { what: 'Add real text around the images in step 2, and check the message still reads with '
+                    + 'images blocked.',
+                label: 'Open the body', call: "safetyFocus('cHtml')" },
+  UNRESOLVED_FIELDS: { what: 'Either drop those tags from the copy or import a list that carries the column '
+                           + 'behind them.',
+                       label: 'Open the body', call: "safetyFocus('cHtml')" },
+  VERIFICATION_FAILED: { what: 'The verifier could not be reached, so this send rests on send history alone. '
+                             + 'Nothing is blocked by it.' }
+};
+
+let safetyReport = null;      // the last report rendered, so an action can read its facts
+let safetySendMode = false;   // opened by Send now rather than by Run pre-send checks
+
+/** Run pre-send checks: the report on its own, with no send button in the foot. */
+async function openSafetyCheck() { return showSafetyModal(false); }
+
+/** Both composer buttons land here. Saving first is not a nicety: check() reads
+    the campaign back out of the database, so an unsaved subject would be checked
+    as the old one and the report would describe a campaign nobody is looking at. */
+async function showSafetyModal(sendMode) {
+  if (composerEditable && !(await saveCampaign(false))) return;
+  if (!currentCampaignId) { toast('Save the campaign first', 'warn'); return; }
+
+  safetySendMode = !!sendMode;
+  // applyPermissions() hides this button with display none on a cold load, so
+  // restoring it here has to ask the same question rather than blindly clear the
+  // style and hand a send control to a role that was denied one.
+  $('safetySend').style.display = (safetySendMode && can('CAMPAIGNS_SEND')) ? '' : 'none';
+  $('safetySend').disabled = true;
+  $('safetySend').textContent = 'Send now';
+  $('safetyVerdict').innerHTML = '';
+  openModal('modalSafety');
+  await runSafetyCheck();
+}
+
+async function runSafetyCheck() {
+  if (!currentCampaignId) return;
+  $('safetyContent').style.display = 'none';
+  $('safetyLoading').style.display = '';
+  $('safetyLoading').textContent = 'Running the checks...';
+  $('safetyRerun').setAttribute('aria-busy', 'true');
+  try {
+    safetyReport = await api('/api/campaignsplus/campaigns/' + currentCampaignId + '/safety-check');
+    renderSafetyReport(safetyReport);
+  } catch (e) {
+    safetyReport = null;
+    renderSafetyUnavailable(e.message);
+  } finally {
+    $('safetyRerun').removeAttribute('aria-busy');
+  }
+}
+
+/* This report is a second read of the checks, not the gate. CampaignService runs
+   assertSafeToSend on every send whatever this screen managed to fetch, so a
+   report that will not load must not become a new gate that fails closed on a
+   network blip. The send stays available and says plainly that it is unchecked. */
+function renderSafetyUnavailable(message) {
+  $('safetyLoading').style.display = 'none';
+  $('safetyContent').style.display = '';
+  $('safetyVerdict').innerHTML = '<span class="pill pill-draft">not checked</span>';
+  $('safetyContent').innerHTML =
+    '<div class="alert warn">The checks could not be read. ' + esc(message || '') + '</div>'
+    + '<div class="note">The send is still checked. These same rules run inside the send path itself, '
+    + 'and a campaign that fails them is refused there whether or not this report loaded.</div>';
+  $('safetySend').disabled = false;
+  $('safetySend').textContent = 'Send without the report';
+}
+
+function renderSafetyReport(r) {
+  const facts = r.facts || {};
+  const blockers = r.blockers || [];
+  const warnings = r.warnings || [];
+  const notes = r.notes || [];
+
+  $('safetyLoading').style.display = 'none';
+  $('safetyContent').style.display = '';
+  $('safetyVerdict').innerHTML = r.passed
+    ? '<span class="pill pill-sent">clear to send</span>'
+    : '<span class="pill pill-failed">' + blockers.length + ' blocking</span>';
+
+  const html = [safetyAudienceBlock(facts)];
+
+  html.push(safetySection('Blockers', blockers.length
+    ? 'Each of these stops the send until it is dealt with.'
+    : '', blockers, 'danger', 'i-block',
+    'No blockers. Every rule that can refuse a send passed.'));
+
+  html.push(safetySection('Warnings', warnings.length
+    ? 'The send goes out with these. They are a judgement, not a refusal.'
+    : '', warnings, 'warn', 'i-warn', 'No warnings.'));
+
+  if (notes.length) html.push(safetySection('Notes', '', notes, 'note', 'i-info', ''));
+
+  html.push(safetyReputationBlock(facts));
+
+  // The sentence the old browser confirm carried. It is the last thing above the
+  // button precisely because it is the part that cannot be taken back.
+  if (safetySendMode && r.passed) {
+    html.push('<div class="alert warn" style="margin:18px 0 0">Sending <b>' + esc(r.campaignName || '')
+      + '</b> to ' + num(facts.audience) + ' recipient(s) cannot be undone.</div>');
+  }
+
+  $('safetyContent').innerHTML = html.join('');
+
+  $('safetySend').disabled = !r.passed;
+  $('safetySend').textContent = facts.audience
+    ? 'Send to ' + num(facts.audience) + ' recipients' : 'Send now';
+}
+
+/** What is actually going out, before any of the judgements about it. These are
+    the server's own counts, not the composer's cached list row, because the two
+    disagree the moment a suppression lands between the last page load and now. */
+function safetyAudienceBlock(facts) {
+  if (facts.audience === undefined && facts.listSize === undefined) return '';
+  const rows = [row('Will be mailed', num(facts.audience))];
+  if (facts.listSize !== undefined) rows.push(row('On the list', num(facts.listSize)));
+  if (facts.unmailableOnList) {
+    rows.push(row('Skipped: unsubscribed, bounced or suppressed', num(facts.unmailableOnList)));
+  }
+  if (facts.alreadySent) rows.push(row('Already sent, will not be mailed again', num(facts.alreadySent)));
+
+  /* The service takes the audience from the queue when there is one and from the
+     list only when there is not, and the two numbers are routinely different: a
+     queue built last week does not know about an unsubscribe from yesterday. Left
+     unexplained the panel reads as arithmetic that does not add up, and it is also
+     the whole reason a suppression can be stuck in a queue at all. */
+  const note = facts.queuedPending
+    ? 'These are rows already queued against this campaign rather than a fresh count from the list. '
+      + 'The send works through that queue, which is why a suppression that landed after queueing has to '
+      + 'be dropped and cannot be re-queued away.'
+    : '';
+
+  return '<div class="eyebrow" style="margin-bottom:8px">Who this goes to</div>'
+       + '<div style="margin-bottom:' + (note ? '8px' : '18px') + '">' + rows.join('') + '</div>'
+       + (note ? '<div style="font-size:12.5px;color:var(--text-dim);margin-bottom:18px">'
+                 + note + '</div>' : '');
+}
+
+/** One severity, one list. The empty line matters as much as the findings do: a
+    bare Blockers heading with nothing under it reads as "not checked yet", and
+    the difference between clear and unexamined is the whole point of the screen. */
+function safetySection(title, lead, findings, kind, icon, emptyLine) {
+  let html = '<div class="eyebrow" style="margin-bottom:8px">' + esc(title)
+    + (findings.length ? ' &middot; ' + findings.length : '') + '</div>';
+  if (lead) {
+    html += '<div style="font-size:12.5px;color:var(--text-dim);margin-bottom:8px">' + esc(lead) + '</div>';
+  }
+  if (!findings.length) {
+    if (!emptyLine) return '';
+    return html + '<div class="note" style="display:flex;align-items:center;gap:8px;margin-bottom:18px">'
+      + '<svg class="ic ic-sm" aria-hidden="true"><use href="#i-check"/></svg>'
+      + esc(emptyLine) + '</div>';
+  }
+  return html + findings.map(f => safetyFinding(f, kind, icon)).join('')
+    + '<div style="height:18px"></div>';
+}
+
+function safetyFinding(finding, kind, icon) {
+  const action = SAFETY_ACTIONS[finding.code] || {};
+  const shell = kind === 'note' ? 'note' : 'alert ' + kind;
+  let html = '<div class="' + shell + '" style="margin-bottom:7px;display:flex;gap:9px;align-items:flex-start">'
+    + '<svg class="ic ic-sm" aria-hidden="true" style="margin-top:2px"><use href="#' + icon + '"/></svg>'
+    + '<div style="flex:1 1 auto;min-width:0">'
+    + '<div>' + esc(finding.message) + '</div>';
+
+  if (finding.detail) {
+    html += '<div class="mono truncate" style="max-width:100%;font-size:11.5px;color:var(--text-mute);'
+      + 'margin-top:4px" title="' + attr(finding.detail) + '">' + esc(finding.detail) + '</div>';
+  }
+  if (action.what) {
+    html += '<div style="font-size:12.5px;color:var(--text-dim);margin-top:6px">' + esc(action.what) + '</div>';
+  }
+  if (action.label && (!action.perm || can(action.perm))) {
+    html += '<button class="btn btn-sm' + (action.danger ? ' btn-danger' : '') + '"'
+      + (action.id ? ' id="' + attr(action.id) + '"' : '')
+      + ' style="margin-top:8px" onclick="' + attr(action.call) + '">' + esc(action.label) + '</button>';
+  }
+  return html + '</div></div>';
+}
+
+/** The two rates the check actually computes, each beside the line it is being
+    measured against. A rate on its own is a number nobody can act on. */
+function safetyReputationBlock(facts) {
+  const days = facts.windowDays || 30;
+  const sent = facts.sentInWindow;
+  const tiles = [
+    safetyRateTile('Bounce rate', facts.bounceRatePct, facts.bouncesInWindow, sent, days,
+      SAFETY_LIMITS.bounceWarnPct, SAFETY_LIMITS.bounceBlockPct),
+    safetyRateTile('Complaint rate', facts.complaintRatePct, facts.complaintsInWindow, sent, days,
+      SAFETY_LIMITS.complaintWarnPct, SAFETY_LIMITS.complaintBlockPct)
+  ];
+
+  // Only when a verifier is wired in and has read this list. It answers the half
+  // of the bounce question history cannot: a list nobody has mailed yet.
+  if (facts.verifiedBouncePct !== null && facts.verifiedBouncePct !== undefined) {
+    tiles.push(kpiTile({
+      cls: safetyRateClass(facts.verifiedBouncePct, SAFETY_LIMITS.bounceWarnPct, SAFETY_LIMITS.bounceBlockPct),
+      label: 'Predicted bounce rate',
+      value: safetyPct(facts.verifiedBouncePct),
+      foot: 'What the address verifier expects of this list, not measured from sends. Warns at '
+          + safetyPct(SAFETY_LIMITS.bounceWarnPct) + ', blocks at '
+          + safetyPct(SAFETY_LIMITS.bounceBlockPct) + '.'
+    }));
+  }
+
+  return '<div class="eyebrow" style="margin-bottom:8px">Reputation</div>'
+    + '<div class="grid grid-half" style="margin-bottom:10px">' + tiles.join('') + '</div>'
+    /* Honesty, not tone. AWS computes the bounce and complaint rates it acts on
+       over a window it does not publish, so these two will not match the SES
+       console and were never going to. Printing ours under a bare heading would
+       let somebody read a number here and believe they know what AWS thinks,
+       which is a belief they would act on. */
+    + '<div class="note">These two rates are ours, not Amazon\'s. They are counted from the '
+    + (sent === undefined ? 'messages' : num(sent) + ' message(s)') + ' this application sent in the last '
+    + days + ' days and the bounces and complaints recorded against them. AWS measures the reputation it '
+    + 'acts on over a window it does not publish, so the figures in the SES console will differ from these. '
+    + 'Read these as our own early warning, and the SES console for what AWS is about to do.</div>';
+}
+
+function safetyRateTile(label, rate, count, sent, days, warnAt, blockAt) {
+  if (rate === null || rate === undefined) {
+    return kpiTile({
+      cls: '', label: label + ', last ' + days + ' days', value: 'no rate',
+      foot: (sent === undefined ? 'Too few messages' : 'Only ' + num(sent) + ' sent')
+          + ' in the window, under the sample floor this check needs before it will estimate a rate '
+          + 'from them.'
+    });
+  }
+  return kpiTile({
+    cls: safetyRateClass(rate, warnAt, blockAt),
+    label: label + ', last ' + days + ' days',
+    value: safetyPct(rate),
+    foot: num(count) + ' of ' + num(sent) + ' sent. Warns at ' + safetyPct(warnAt)
+        + ', blocks at ' + safetyPct(blockAt) + '.'
+  });
+}
+
+function safetyRateClass(rate, warnAt, blockAt) {
+  if (rate >= blockAt) return 'danger';
+  if (rate >= warnAt) return 'warn';
+  return 'good';
+}
+
+/* Two decimals, the same as the service prints inside its own messages, so the
+   tile and the sentence beside it never look like two different measurements. */
+function safetyPct(value) { return Number(value).toFixed(2) + '%'; }
+
+/* ---------- the actions a finding offers ---------- */
+
+function safetyGoTo(view) { closeModal('modalSafety'); go(view); }
+function safetyFocus(fieldId) { closeModal('modalSafety'); focusField(fieldId); }
+function safetySchedule() { closeModal('modalSafety'); openScheduleModal(); }
+
+/** The escape hatch. SUPPRESSED_QUEUED is the one blocker whose fix lives inside
+    this application, and dropSuppressedQueued is the only thing that clears it:
+    the repository says twice that a requeue skips rows that already exist, so it
+    walks straight past these and leaves the campaign blocked for good. Confirmed
+    because it takes people off a campaign, and the check is run again straight
+    afterwards so the blocker is seen to go rather than claimed to. */
+async function dropSuppressedRecipients() {
+  if (!currentCampaignId) return;
+  const queued = safetyReport && safetyReport.facts
+    ? safetyReport.facts.suppressedStillQueued : null;
+  const who = queued ? num(queued) + ' recipient(s)' : 'these recipients';
+  if (!confirm('Remove ' + who + ' from this campaign?\n\n'
+      + 'They are on the suppression list, so they were never going to be mailed. This marks them '
+      + 'SKIPPED and they stay off the campaign.')) return;
+
+  const btn = $('safetyDropBtn');
+  if (btn) btn.setAttribute('aria-busy', 'true');
+  try {
+    const res = await post('/api/campaignsplus/campaigns/' + currentCampaignId + '/drop-suppressed', {});
+    toast(res.message, 'ok');
+    loadRecipients();
+    await runSafetyCheck();
+  } catch (e) {
+    toast(e.message, 'err');
+    if (btn) btn.removeAttribute('aria-busy');
+  }
+}
+
+async function sendAfterSafetyCheck() {
+  if (!currentCampaignId) return;
+  const btn = $('safetySend');
+  btn.setAttribute('aria-busy', 'true');
   $('sendBtn').disabled = true;
   try {
-    toast((await post('/api/campaigns/send', { id: currentCampaignId })).message, 'ok');
+    const res = await post('/api/campaigns/send', { id: currentCampaignId });
+    closeModal('modalSafety');
+    toast(res.message, 'ok');
     pollProgress();
-  } catch (e) { toast(e.message, 'err'); $('sendBtn').disabled = false; }
+  } catch (e) {
+    // The send path runs the same checks and is the authority, so a refusal here
+    // means the report on screen is already out of date. Read it again rather
+    // than leaving "clear to send" sitting above an error that says otherwise.
+    toast(e.message, 'err');
+    $('sendBtn').disabled = false;
+    await runSafetyCheck();
+  } finally {
+    btn.removeAttribute('aria-busy');
+  }
 }
 
 function openScheduleModal() {
@@ -1339,6 +1769,27 @@ async function scheduleCampaign() {
     closeModal('modalSchedule');
     openCampaign(currentCampaignId);
   } catch (e) { toast(e.message, 'err'); }
+}
+
+/** Undoes a schedule. Until now the console could put a campaign into SCHEDULED and
+    offered no way out of it: the endpoint has existed the whole time with no caller,
+    so the only exit was editing the database. Confirms first, because on a shared
+    console the person unscheduling is often not the person who scheduled. */
+async function cancelSchedule(e, id) {
+  if (e) { e.stopPropagation(); e.preventDefault(); }
+  if (!id) return;
+  const row = campaignCache.find(c => String(c.id) === String(id));
+  const name = (row && row.name) || 'this campaign';
+  const ask = ['Unschedule "' + name + '"?', '',
+    'It goes back to a draft and will not send at the time it was set for.',
+    'You can schedule it again afterwards.'].join(String.fromCharCode(10));
+  if (!confirm(ask)) return;
+  try {
+    const res = await post('/api/campaigns/cancel-schedule', { id });
+    toast(res.message, 'ok');
+    await loadCampaigns();
+    if (String(currentCampaignId) === String(id)) openCampaign(id);
+  } catch (err) { toast(err.message, 'err'); }
 }
 
 function pollProgress() {
@@ -2253,10 +2704,117 @@ async function loadAnalytics() {
     '<tr><td>' + esc(c.name) + '</td><td>' + num(c.count) + '</td><td>' + esc(c.share) + '%</td></tr>').join('')
     : emptyState(3, 'i-analytics', 'No reliable opens to break down yet.', '');
 
+  // Three things that arrived in every /overview response and were dropped on the
+  // floor. The classifier buckets and the device split cost no extra request; only
+  // the campaign comparison needs one, and it is deliberately not awaited, so a
+  // slow five-queries-per-campaign scan cannot hold up the rest of the screen.
+  renderBuckets(d);
+  renderDevices(d);
+  renderCampaignCompare();
+
   // The segments are per campaign by definition: "who opened and did nothing" has no
   // meaning across a whole account, because a person can be a non-opener of one
   // message and a clicker of the next.
   loadSegments(picker.value);
+}
+
+/* One colour per classification, held here rather than taken from CHART_INK in
+   order, because these four are a legend a reader learns: reliable is the green
+   that means counted, and the three excluded classes must not borrow the accent
+   the counted one uses. */
+const TRUST_INK = {
+  HUMAN:     '#1f9d55',
+  APPLE_MPP: '#d99e0b',
+  PROXY:     '#7f93a3',
+  BOT:       '#e0483c'
+};
+
+/** The classifier's arithmetic, which the note above the chart asserts and this lets
+    a reader check. A stacked share and not a donut: the split is routinely 90/8/2 and
+    a donut turns the two numbers under argument into unlabelled slivers. */
+function renderBuckets(d) {
+  const host = $('anBucketChart');
+  if (!host) return;
+  const c = d.classifier || {};
+  const buckets = c.buckets || [];
+
+  drawStackedShare(host, buckets.map(b => ({
+    label: b.label,
+    value: Number(b.opens) || 0,
+    note: b.description,
+    color: TRUST_INK[b.classification] || CHART_INK.rest
+  })), { empty: 'No opens recorded in this window.' });
+
+  // Say what the two thresholds actually are. "We filter bots" is a claim; three
+  // seconds and a named number of Apple ranges is something you can disagree with.
+  const secs = Number(c.prefetchWindowSeconds);
+  const ranges = Number(c.appleNetworkRanges);
+  const parts = [];
+  if (secs >= 0 && !isNaN(secs)) {
+    parts.push('An image fetched within <b>' + secs + ' second' + (secs === 1 ? '' : 's')
+      + '</b> of the send is treated as a pre-fetch and not as a read, because nobody opens '
+      + 'a message that fast.');
+  }
+  if (!isNaN(ranges) && ranges > 0) {
+    parts.push('Opens from <b>' + num(ranges) + '</b> known Apple network ranges are recorded as '
+      + 'Apple MPP. Only the first bucket counts towards the open rate.');
+  }
+  $('anBucketBasis').innerHTML = parts.join(' ')
+    || 'Only reliable opens count towards the open rate.';
+}
+
+/** The device split. Present in clients.devices on every request; the screen has
+    been rendering clients.clients beside it and ignoring this half all along. */
+function renderDevices(d) {
+  const host = $('anDevicesChart');
+  if (!host) return;
+  const devices = (d.clients && d.clients.devices) || [];
+  drawDonut(host, devices.map(x => ({ label: x.name, value: Number(x.count) || 0 })), {
+    centerLabel: 'reliable opens',
+    empty: 'No reliable opens to break down yet.'
+  });
+}
+
+/** Campaign against campaign, the only ranking in the product. Its own request,
+    because byCampaign runs five aggregates per campaign and bundling it would charge
+    the whole account history to every open of this screen. */
+async function renderCampaignCompare() {
+  const host = $('anCompareChart');
+  if (!host) return;
+  const note = $('anCompareNote');
+  if (note) note.textContent = '';
+
+  let cmp;
+  try { cmp = await api('/api/analytics/campaigns?days=' + $('anDays').value); }
+  catch (e) {
+    drawCompareBars(host, [], [], { empty: 'Could not load the comparison.' });
+    return;
+  }
+
+  const rows = (cmp.campaigns || []).map(c => ({
+    id: c.campaignId,
+    label: c.name,
+    values: [Number(c.openRate) || 0, Number(c.clickRate) || 0],
+    notes: [(Number(c.openRate) || 0) + '%', (Number(c.clickRate) || 0) + '%']
+  }));
+
+  drawCompareBars(host, rows, [
+    { label: 'Open rate', color: CHART_INK.series1 },
+    { label: 'Click rate', color: CHART_INK.series2 }
+  ], {
+    formatAxis: v => Math.round(v) + '%',
+    empty: 'Nothing was sent in this window.',
+    // A ranking you cannot open is a ranking nobody can act on, so a row loads
+    // that campaign into the picker above and redraws the whole screen for it.
+    onSelect: r => { $('anCampaign').value = r.id; loadAnalytics(); }
+  });
+
+  // Print the cap rather than quietly showing the top twelve as though they were all.
+  if (note && cmp.truncated) {
+    note.textContent = 'Top ' + rows.length + ' of ' + num(cmp.totalCampaigns) + ' by size';
+  } else if (note && rows.length) {
+    note.textContent = rows.length + ' campaign' + (rows.length === 1 ? '' : 's');
+  }
 }
 
 /* =========================================================================

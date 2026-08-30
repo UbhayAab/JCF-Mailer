@@ -17,6 +17,15 @@ import static com.jarurat.mailer.controllers.AudienceApi.csv;
 /**
  * Read side of the honest numbers. Every response is scoped by a day window and
  * optionally by campaign, and every rate in them comes from HUMAN events only.
+ *
+ * Three endpoints were removed here rather than wired: /summary, /clients and
+ * /classifier each returned a value that /overview already returns under a key of
+ * the same name, and /overview is what the console actually calls. They were not
+ * dark features waiting for a screen, they were a second door onto data already
+ * coming through the first, and every one of them cost a permission check, a URL
+ * and a shape to keep in step with the bundle. What was genuinely unreachable was
+ * never the endpoint, it was two fields inside /overview that no renderer read:
+ * clients.devices, and the whole classifier bucket table.
  */
 @RestController
 @RequestMapping("/api/analytics")
@@ -37,20 +46,41 @@ public class AnalyticsApi {
         this.segmentRepository = segmentRepository;
     }
 
-    @GetMapping("/summary")
-    @PreAuthorize("hasAuthority('ANALYTICS_READ')")
-    public Map<String, Object> summary(@RequestParam(required = false) Long campaignId,
-                                       @RequestParam(defaultValue = "30") int days) {
-        return analytics.summary(campaignId, days);
-    }
-
+    /**
+     * The daily line on its own, and the window it covers alongside it.
+     *
+     * The window is why this exists. The dashboard sparkline needs one series and
+     * one date range, and it gets them today by calling /overview, which runs the
+     * summary, the link table, the client split and the classifier as well: five
+     * passes over tracking_event to draw one line. It could never call this
+     * endpoint instead, because the old shape was a bare list of days with no
+     * from and no to on it, and the range printed above the chart comes from
+     * summary.from. Echoing the window here is the whole difference between an
+     * endpoint nobody can use and the right call for that card.
+     */
     @GetMapping("/series")
     @PreAuthorize("hasAuthority('ANALYTICS_READ')")
-    public List<Map<String, Object>> series(@RequestParam(required = false) Long campaignId,
-                                            @RequestParam(defaultValue = "30") int days) {
-        return analytics.dailySeries(campaignId, days);
+    public Map<String, Object> series(@RequestParam(required = false) Long campaignId,
+                                      @RequestParam(defaultValue = "30") int days) {
+        // Recomputed rather than derived from the rows: this is the same call
+        // dailySeries makes internally, so the two cannot drift, and the strings
+        // match summary.from and summary.to exactly for a caller reading both.
+        AnalyticsService.Window w = AnalyticsService.Window.ofDays(days);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("campaignId", campaignId);
+        out.put("windowDays", w.days());
+        out.put("from", w.from().toString());
+        out.put("to", w.to().toString());
+        out.put("series", analytics.dailySeries(campaignId, days));
+        return out;
     }
 
+    /**
+     * Kept, though nothing calls it yet, because a named consumer is queued for it:
+     * the composer's own link table reads raw click rows with no bot filtering at
+     * all, and the plan is to point it here and delete that path. Deleting this
+     * would only mean writing it again.
+     */
     @GetMapping("/links")
     @PreAuthorize("hasAuthority('ANALYTICS_READ')")
     public List<Map<String, Object>> links(@RequestParam(required = false) Long campaignId,
@@ -59,28 +89,55 @@ public class AnalyticsApi {
         return analytics.topLinks(campaignId, days, limit);
     }
 
-    @GetMapping("/clients")
-    @PreAuthorize("hasAuthority('ANALYTICS_READ')")
-    public Map<String, Object> clients(@RequestParam(required = false) Long campaignId,
-                                       @RequestParam(defaultValue = "30") int days) {
-        return analytics.clients(campaignId, days);
-    }
-
+    /**
+     * Campaign against campaign, which is the one comparison the product does not
+     * have anywhere else, and the reason this is not folded into /overview:
+     * byCampaign runs five aggregate queries per campaign, so bundling it would
+     * charge the whole cost of the account's history to every open of the screen.
+     */
     @GetMapping("/campaigns")
     @PreAuthorize("hasAuthority('ANALYTICS_READ')")
-    public List<Map<String, Object>> campaigns(@RequestParam(defaultValue = "30") int days) {
-        return analytics.byCampaign(days);
+    public Map<String, Object> campaigns(@RequestParam(defaultValue = "30") int days,
+                                         @RequestParam(defaultValue = "12") int limit) {
+        AnalyticsService.Window w = AnalyticsService.Window.ofDays(days);
+        List<Map<String, Object>> rows = new ArrayList<>(analytics.byCampaign(days));
+
+        // Biggest send first. The service hands back whatever order the group by
+        // produced, which is effectively campaign id, so a chart drawn straight
+        // off it ranks by age and by nothing a reader came to find out.
+        rows.sort((a, b) -> Long.compare(asLong(b.get("sent")), asLong(a.get("sent"))));
+
+        // A comparison with two hundred rows is not a comparison. Capping here
+        // rather than in the renderer is what lets the response say how many rows
+        // it left out, so the screen can print that instead of quietly lying.
+        int cap = Math.max(1, Math.min(100, limit));
+        boolean truncated = rows.size() > cap;
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("windowDays", w.days());
+        out.put("from", w.from().toString());
+        out.put("to", w.to().toString());
+        out.put("totalCampaigns", rows.size());
+        out.put("truncated", truncated);
+        out.put("campaigns", truncated ? new ArrayList<>(rows.subList(0, cap)) : rows);
+        return out;
     }
 
-    /** Why the headline moved, in the classifier's own words. */
-    @GetMapping("/classifier")
-    @PreAuthorize("hasAuthority('ANALYTICS_READ')")
-    public Map<String, Object> classifier(@RequestParam(required = false) Long campaignId,
-                                          @RequestParam(defaultValue = "30") int days) {
-        return analytics.classifierInfo(campaignId, days);
+    /** Sorting a Map<String, Object> whose values arrive boxed as whatever the driver chose. */
+    private static long asLong(Object v) {
+        return v instanceof Number n ? n.longValue() : 0L;
     }
 
-    /** One call for the whole Analytics screen, so opening it is not five round trips. */
+    /**
+     * One call for the whole Analytics screen, so opening it is not five round trips.
+     *
+     * Two of these keys are paid for on every request and read by nobody:
+     * clients.devices, which OpenTrackingService fills in on every tracked open,
+     * and classifier, whose bucket table is the honest per classification split.
+     * The console draws the client half of clients and writes the classifier line
+     * as prose off summary instead. charts.js now carries renderers for both;
+     * mounting them is a console.html and console.js change.
+     */
     @GetMapping("/overview")
     @PreAuthorize("hasAuthority('ANALYTICS_READ')")
     public Map<String, Object> overview(@RequestParam(required = false) Long campaignId,

@@ -471,6 +471,14 @@
                                 <button class="btn" style="flex:1" onclick="saveCampaign(true)">Save draft</button>
                                 <button class="btn" style="flex:1" data-perm="CAMPAIGNS_SEND" onclick="openScheduleModal()">Schedule</button>
                             </div>
+                            <!-- The send path already runs these checks and throws on a blocker, so
+                                 before this button existed the only way to learn why a send was refused
+                                 was to attempt it and read one sentence out of a toast. This runs the
+                                 same report on demand and shows all of it. -->
+                            <button class="btn" style="width:100%;margin-bottom:9px" id="safetyBtn"
+                                    data-perm="CAMPAIGNS_WRITE" onclick="openSafetyCheck()">
+                                <svg class="ic ic-sm" aria-hidden="true"><use href="#i-shield"/></svg>
+                                Run pre-send checks</button>
                             <button class="btn btn-primary" style="width:100%" id="sendBtn"
                                     data-perm="CAMPAIGNS_SEND" onclick="sendCampaign()">Send now</button>
 
@@ -717,6 +725,29 @@
                              role="img" aria-label="How long after sending people first opened"></svg>
                     </div>
                     <div class="note" id="anTtoBasis" style="margin-top:10px"></div>
+                </div>
+            </div>
+
+            <!-- The classifier's own arithmetic. The note above says the open rate was
+                 deflated; this says by whom, which is the only form of that claim a
+                 reader can check. Arrived in every /overview response and was dropped. -->
+            <div class="panel" id="anBucketPanel" style="margin-bottom:18px">
+                <div class="panel-head"><h3>What the classifier did with every pixel load</h3></div>
+                <div class="panel-body">
+                    <div class="chart-host" id="anBucketChart"></div>
+                    <div class="note" id="anBucketBasis" style="margin-top:12px"></div>
+                </div>
+            </div>
+
+            <div class="grid grid-2" style="margin-bottom:18px">
+                <div class="panel">
+                    <div class="panel-head"><h3>What they read it on</h3></div>
+                    <div class="panel-body"><div class="chart-host" id="anDevicesChart"></div></div>
+                </div>
+                <div class="panel">
+                    <div class="panel-head"><h3>Campaign against campaign</h3><span class="spacer"></span>
+                        <span class="eyebrow" id="anCompareNote"></span></div>
+                    <div class="panel-body"><div class="chart-host" id="anCompareChart"></div></div>
                 </div>
             </div>
 
@@ -1365,6 +1396,30 @@
     <div class="modal-foot"><button class="btn" onclick="closeModal('modalMessage')">Close</button></div>
 </div></div>
 
+<!-- The pre-send report. SafetyCheckService is what the send path itself runs, so a
+     dangerous send was already refused; what nobody could see was why. The three lists
+     stay three lists on purpose. A blocker stops the send and needs an action, a warning
+     is information the sender should weigh, and a note is neither. Flattened into one
+     column, "tracking is off" sat beside "the domain is not verified" looking equally
+     like the reason nothing went out. -->
+<div class="modal-backdrop" id="modalSafety"><div class="modal wide">
+    <div class="modal-head">
+        <svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg>
+        <h3>Pre-send checks</h3>
+        <span style="margin-left:auto" id="safetyVerdict"></span>
+    </div>
+    <div class="modal-body">
+        <div id="safetyLoading" style="padding:26px 0;text-align:center;color:var(--text-dim)">Running the checks...</div>
+        <div id="safetyContent" style="display:none"></div>
+    </div>
+    <div class="modal-foot">
+        <button class="btn" onclick="closeModal('modalSafety')">Close</button>
+        <button class="btn" id="safetyRerun" onclick="runSafetyCheck()">Run again</button>
+        <button class="btn btn-primary" id="safetySend" data-perm="CAMPAIGNS_SEND"
+                disabled onclick="sendAfterSafetyCheck()">Send now</button>
+    </div>
+</div></div>
+
 <div id="toasts"></div>
 
 <script th:inline="javascript">
@@ -1374,6 +1429,7 @@
 <script src="/js/charts.js"></script>
 <script src="/js/console.js"></script>
 <script src="/js/journey.js"></script>
+<script src="/js/templates.js"></script>
 <script src="/js/update.js?v=u1"></script>
 <th:block th:replace="~{fragments/pwa :: script}"></th:block>
 </body>
