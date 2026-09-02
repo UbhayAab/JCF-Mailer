@@ -1,5 +1,7 @@
 # JCF Mailer - Campaign Studio
 
+**Running locally?** See [docs/LOCAL-DEV.md](docs/LOCAL-DEV.md). No production credential is needed, or should be requested.
+
 The email platform for **Jarurat Care Foundation**. One Spring Boot application that
 covers both halves of the foundation's outbound mail:
 
