@@ -19,8 +19,25 @@ Production instance: **https://mailer.jarurat.care**
 
 ---
 
+## Which repository is this?
+
+Four repositories carry a version of this name and only one of them is the live source.
+
+| Repository | Visibility | What it is |
+|---|---|---|
+| **`UbhayAab/JCF-Mailer`** | public | **This one. The source that runs in production. Clone this, branch from `main`, open pull requests here.** |
+| `UbhayAab/JCF-Mailer-v2` | public | A single snapshot pushed on 27 Aug 2026 when the v2 rewrite was first published. History only. Nothing lands here. |
+| `jarurat-care-private/JCF-Mailer` | public | Frozen at commit `9b7b4d8`, the v1 application from 4 Aug 2026, from before the rewrite. It has the same name and the same landing page and it is not this codebase. |
+| `UbhayAab/jarurat-mail-ui` | private | A static HTML design preview on sample data. No backend, no build, not wired to anything. |
+
+If someone sent you a link to any row but the first, you have the wrong code. The
+company that reads "the repository is incomplete" is reading row three.
+
+---
+
 ## Contents
 
+- [Which repository is this?](#which-repository-is-this)
 - [Prerequisites](#prerequisites)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
@@ -48,7 +65,7 @@ is no migration tool to install and no DDL to apply by hand on a fresh database.
 ## Quick start
 
 ```bash
-git clone https://github.com/jarurat-care-private/JCF-Mailer.git
+git clone https://github.com/UbhayAab/JCF-Mailer.git
 cd JCF-Mailer
 
 # 1. database
@@ -122,7 +139,7 @@ Everything is under `src/main/java/com/jarurat/mailer/`.
 
 | Package | What is in it |
 |---|---|
-| `models` | JPA entities: `Subscriber`, `MailingList`, `ListMember`, `Campaign`, `CampaignRecipient`, `EmailTemplate`, `ClickEvent`, `GlobalSuppression`, `TransactionalLog`, `User`, `ApiKey`, `AuditLog` |
+| `models` | JPA entities: `Subscriber`, `MailingList`, `ListMember`, `Campaign`, `CampaignRecipient`, `EmailTemplate`, `ClickEvent`, `GlobalSuppression`, `TransactionalLog`, `QueuedMessage`, `MailboxSettings`, `User`, `ApiKey`, `AuditLog` |
 | `repositories` | Spring Data repositories for the above |
 | `services` | `CampaignService` (build and send a campaign), `SesSender` (the single outbound path to SES), `SubscriberService`, `SuppressionService`, `TransactionalMailService`, `AuditService`, `BootstrapService` (seed owner) |
 | `controllers` | The HTTP surface. `PageController` serves the console shell; `AdminApi`, `AudienceApi`, `CampaignApi`, `TemplateApi` and `OverviewApi` back it. `TrackingController` handles open pixels and click redirects. `PublicApiV1` and `TransactionalApi` are the key-authenticated external API. |
@@ -151,17 +168,35 @@ Everything is under `src/main/java/com/jarurat/mailer/`.
 | Package | What is in it |
 |---|---|
 | `mail` | JMAP client for Stalwart: sessions, folders, messages, attachments |
-| `webmail` | The Inbox screen, plus `MailHtmlSanitizer` for rendering untrusted mail |
+| `webmail` | The mailbox screens: reading, composing, contact suggestions, and `MailHtmlSanitizer` for rendering untrusted mail. Also the outbox, where `OutboxService` holds a message for the undo window or until the time it was scheduled for, `OutboxSpool` keeps its attachments on this server's disk until the moment it goes, and `RecipientField` refuses an address the mail server would reject |
 | `directory` | Mailbox and domain administration against the Stalwart admin API, and domain health checks (SPF, DKIM, DMARC) |
+
+### Phones and notifications
+
+| Package | What is in it |
+|---|---|
+| `push` | Web push end to end: VAPID keys, subscriptions, the encrypted payload (`WebPushCrypto`), per-person notification rules, and the notification that tells the sender a scheduled message failed |
+| `device` | Remembered devices. A persistent cookie plus an encrypted mailbox credential, so a phone does not ask for the mailbox password on every visit, and the screen that lists and revokes them |
+| `config` | Spring configuration with nowhere better to live |
 
 ### Front end
 
 Server-rendered Thymeleaf plus vanilla JS. No node, no build step.
 
-- `src/main/resources/templates/` - `console.html` (the whole studio), `mail.html`,
-  `landing.html`, `login.html`
-- `src/main/resources/static/js/` - `console.js`, `journey.js`, `charts.js`, `mail.js`
+- `src/main/resources/templates/` - `console.html` (the whole studio), `mail.html` (the
+  mailbox), `landing.html`, `login.html`, `too-many-requests.html`, and `fragments/`,
+  whose `icons.html` is the only source of icons in the application
+- `src/main/resources/static/js/` - `console.js`, `journey.js`, `charts.js` and
+  `templates.js` for the studio; `mail.js`, `mailbulk.js`, `mailkeys.js` and
+  `mailsettings.js` for the mailbox; `notify.js`, `pwa.js`, `session.js` and `update.js`
+  across both
 - `src/main/resources/static/css/style.css`
+- `src/main/resources/static/sw.js` - the service worker. **It precaches the scripts
+  above, so any change to one of them must come with a bump to `VERSION` in `sw.js`.**
+  Miss that and an installed phone keeps serving the old file, which reads exactly like
+  a fix that shipped and did nothing.
+- [`docs/UI-SPEC.md`](docs/UI-SPEC.md) is the binding contract for anything visual,
+  including the stacking order table. Read it before changing a screen.
 
 ---
 
@@ -173,7 +208,13 @@ export JAVA_HOME=/path/to/jdk-21
 ```
 
 Produces `target/mailer-0.0.1-SNAPSHOT.jar`, a self-contained Spring Boot fat jar of
-about 73 MB. Verified green on JDK 21: 75 tests, 0 failures, 0 errors.
+about 74 MB. `./mvnw -B clean package` runs the whole suite on the way through and has
+to end with 0 failures and 0 errors. A jar noticeably smaller than that is a repackage
+that failed, usually because another Java process was holding the file open.
+
+The suite boots the entire Spring context against H2, which is what validates every JPA
+mapping, every derived repository method name and every JPQL query before a deploy can
+find them. Native SQL is not checked there.
 
 Run the jar directly with `java -jar target/mailer-0.0.1-SNAPSHOT.jar`, with the same
 environment variables set.
@@ -211,10 +252,13 @@ Production topology, ports, file locations and DNS are documented in
 
 | Document | Audience |
 |---|---|
+| [`docs/LOCAL-DEV.md`](docs/LOCAL-DEV.md) | Anyone running the application for the first time. Needs no production credential |
 | [`docs/API.md`](docs/API.md) | Developers integrating another project against the public API |
+| [`docs/UI-SPEC.md`](docs/UI-SPEC.md) | Anyone changing a screen. The binding design contract |
 | [`docs/MAIL-PLATFORM.md`](docs/MAIL-PLATFORM.md) | Operators and integrators. Architecture, the three systems that share the domain, mailbox administration, DNS |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Production topology and runbook |
 | [`docs/BUILD-PLAN.md`](docs/BUILD-PLAN.md) | Design history and the reasoning behind the v2 rewrite |
+| [`docs/CAMPAIGN-PLAN.md`](docs/CAMPAIGN-PLAN.md) | The marketing side in detail: campaigns, journeys, analytics |
 
 ---
 
